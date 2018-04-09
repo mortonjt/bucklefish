@@ -21,15 +21,95 @@ def generate():
 @click.option('--low', default=2, help='Lower bound of gradient')
 @click.option('--high',default=10,  help='Upper bound of gradient')
 @click.option('--alpha_mean',  default=0, help='Mean prior for global bias')
-@click.option('--alpha_scale', default=2, help='Scale prior for global bias')
+@click.option('--alpha_scale', default=1, help='Scale prior for global bias')
 @click.option('--theta_mean',  default=0, help='Mean prior for sample bias')
-@click.option('--theta_scale', default=2, help='Scale prior for sample bias')
+@click.option('--theta_scale', default=1, help='Scale prior for sample bias')
 @click.option('--gamma_mean',  default=0, help='Mean prior for feature bias')
-@click.option('--gamma_scale', default=2, help='Scale prior for feature bias')
+@click.option('--gamma_scale', default=1, help='Scale prior for feature bias')
 @click.option('--kappa_mean',  default=0, help='Mean prior for dispersion')
-@click.option('--kappa_scale', default=2, help='Scale prior for dispersion')
+@click.option('--kappa_scale', default=1, help='Scale prior for dispersion')
 @click.option('--beta_mean',   default=0, help='Mean prior for covariate')
-@click.option('--beta_scale',  default=2, help='Scale prior for covariate')
+@click.option('--beta_scale',  default=1, help='Scale prior for covariate')
+@click.option('--seed', default=0, help='Random number generator')
+def simulate_poisson(
+        output_dir,
+        num_samples, num_features,
+        reps,
+        low, high,
+        alpha_mean,
+        alpha_scale,
+        theta_mean,
+        theta_scale,
+        gamma_mean,
+        gamma_scale,
+        kappa_mean,
+        kappa_scale,
+        beta_mean,
+        beta_scale,
+        seed):
+
+    if not os.path.exists(output_dir):
+        os.mkdir(output_dir)
+
+    table_file = os.path.join(output_dir, 'table.biom')
+    metadata_file = os.path.join(output_dir, 'metadata.txt')
+    tree_file = os.path.join(output_dir, 'tree.nwk')
+    beta_file = os.path.join(output_dir, 'beta.csv')
+    theta_file = os.path.join(output_dir, 'theta.csv')
+    gamma_file = os.path.join(output_dir, 'gamma.csv')
+    kappa_file = os.path.join(output_dir, 'kappa.csv')
+    eps_file= os.path.join(output_dir, 'eps.csv')
+
+    feat_ids = ['F%d' % i for i in range(num_features)]
+    ranks = pd.Series(np.arange(num_features), index=feat_ids)
+    tree = rank_linkage(ranks, method='average')
+
+    gen = random_poisson_model(num_samples, num_features,
+                               tree,
+                               reps,
+                               low, high,
+                               alpha_mean,
+                               alpha_scale,
+                               theta_mean,
+                               theta_scale,
+                               gamma_mean,
+                               gamma_scale,
+                               kappa_mean,
+                               kappa_scale,
+                               beta_mean,
+                               beta_scale,
+                               seed)
+    (table, metadata, basis, sim_alpha,
+     sim_beta, sim_theta, sim_gamma, sim_kappa, sim_eps) = gen
+
+    tree.write(tree_file)
+
+    with biom_open(table_file, 'w') as f:
+        table.to_hdf5(f, "simulation")
+    metadata.to_csv(metadata_file, sep='\t')
+    sim_beta.to_csv(beta_file)
+    sim_gamma.to_csv(gamma_file)
+    sim_theta.to_csv(theta_file)
+    sim_kappa.to_csv(kappa_file)
+
+
+@generate.command()
+@click.option('--output_dir', help='output directory')
+@click.option('--num_samples', type=int)
+@click.option('--num_features', type=int)
+@click.option('--reps', default=1, help='replicates')
+@click.option('--low', default=2, help='Lower bound of gradient')
+@click.option('--high',default=10,  help='Upper bound of gradient')
+@click.option('--alpha_mean',  default=0, help='Mean prior for global bias')
+@click.option('--alpha_scale', default=1, help='Scale prior for global bias')
+@click.option('--theta_mean',  default=0, help='Mean prior for sample bias')
+@click.option('--theta_scale', default=1, help='Scale prior for sample bias')
+@click.option('--gamma_mean',  default=0, help='Mean prior for feature bias')
+@click.option('--gamma_scale', default=1, help='Scale prior for feature bias')
+@click.option('--kappa_mean',  default=0, help='Mean prior for dispersion')
+@click.option('--kappa_scale', default=1, help='Scale prior for dispersion')
+@click.option('--beta_mean',   default=0, help='Mean prior for covariate')
+@click.option('--beta_scale',  default=1, help='Scale prior for covariate')
 @click.option('--seed', default=0, help='Random number generator')
 def simulate_multinomial(
         output_dir,
@@ -88,6 +168,7 @@ def simulate_multinomial(
         table.to_hdf5(f, "simulation")
     metadata.to_csv(metadata_file, sep='\t')
     sim_beta.to_csv(beta_file)
+    sim_gamma.to_csv(gamma_file)
     sim_theta.to_csv(theta_file)
     sim_kappa.to_csv(kappa_file)
 
