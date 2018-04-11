@@ -11,6 +11,7 @@ from gneiss.util import match, match_tips, rename_internal_nodes
 from tensorflow.contrib.distributions import Multinomial, Normal
 from patsy import dmatrix
 from skbio import TreeNode
+from scipy.stats import spearmanr
 import time
 
 
@@ -62,6 +63,8 @@ flags.DEFINE_integer("summary_interval", 5,
 flags.DEFINE_integer("checkpoint_interval", 600,
                      "Checkpoint the model (i.e. save the parameters) every n "
                      "seconds (rounded up to statistics interval).")
+flags.DEFINE_boolean("verbose", False,
+                     "Specifies if cross validation and summaries are saved during training. ")
 FLAGS = flags.FLAGS
 
 
@@ -102,14 +105,41 @@ class Options(object):
       os.makedirs(self.save_path)
 
 
-def cross_validation(beta, gamma, y_data):
+def cross_validation(G, beta, gamma, data):
   """ Computes two cross validation metrics
 
   1) Rank difference
-  2) MSE
+  2) Mean squared error on observed entries
 
+  Parameters
+  ----------
+  G : np.array
+     Design matrix
+  beta : np.array
+     Regression coefficients
+  gamma : np.array
+     Regression intercepts
+  data : np.array
+     Dense matrix of counts.  Samples are rows
+     and features are columns.
+
+  Returns
+  -------
+  mse : float
+     Mean squared error across all of the cells in the matrix
+  mrc : float
+     Mean rank correlation.  This take the average spearman
+     correlation across every sample.  This boils down to matching
+     rank species curves per sample.
   """
-  pass
+  n = data.sum(axis=1).reshape(-1, 1)
+  pred = np.multiply(n, G @ beta + gamma)
+  mse = np.mean(np.ravel((data - pred)**2))
+  mrc = np.mean([
+    spearmanr(data[i, :], pred[i, :])[0]
+    for i in range(data.shape[0])
+  ])
+  return mse, mrc
 
 
 def main(_):
@@ -138,7 +168,6 @@ def main(_):
   )
   # preprocessing
   train_table, train_metadata = opts.train_table, opts.train_metadata
-  train_metadata.columns = [x.replace('-', '_') for x in train_metadata.columns]
   train_metadata = train_metadata.loc[train_table.ids(axis='sample')]
 
   sample_filter = lambda val, id_, md: (
@@ -153,6 +182,18 @@ def main(_):
   sort_f = lambda xs: [xs[train_metadata.index.get_loc(x)] for x in xs]
   train_table = train_table.sort(sort_f=sort_f, axis='sample')
   train_metadata = dmatrix(opts.formula, train_metadata, return_type='dataframe')
+
+  # hold out data preprocessing
+  test_table, test_metadata = opts.test_table, opts.test_metadata
+  metadata_filter = lambda val, id_, md: id_ in test_metadata.index
+  obs_lookup = set(train_table.ids(axis='observation'))
+  feat_filter = lambda val, id_, md: id_ in obs_lookup
+  test_table = test_table.filter(metadata_filter, axis='sample')
+  test_table = test_table.filter(feat_filter, axis='observation')
+
+  sort_f = lambda xs: [xs[test_metadata.index.get_loc(x)] for x in xs]
+  test_table = test_table.sort(sort_f=sort_f, axis='sample')
+  test_metadata = dmatrix(opts.formula, test_metadata, return_type='dataframe')
 
   p = train_metadata.shape[1]   # number of covariates
   G_data = train_metadata.values
@@ -221,13 +262,14 @@ def main(_):
       start_time = time.time()
       for i in range(num_iter):
           batch_idx = np.random.choice(idx, size=batch_size)
+          feed_dict={
+              Y_ph: y_data[batch_idx].astype(np.float32),
+              G_ph: train_metadata.values[batch_idx].astype(np.float32),
+              total_count: y_data[batch_idx].sum(axis=1).astype(np.float32)
+          }
           _, summary, train_loss, grads = session.run(
-              [train, merged, loss, gradients],
-              feed_dict={
-                  Y_ph: y_data[batch_idx].astype(np.float32),
-                  G_ph: train_metadata.values[batch_idx].astype(np.float32),
-                  total_count: y_data[batch_idx].sum(axis=1).astype(np.float32)
-              }
+            [train, merged, loss, gradients],
+            feed_dict=feed_dict
           )
           writer.add_summary(summary, i)
           losses[i] = train_loss
@@ -235,7 +277,18 @@ def main(_):
       log_handle.write('Elapsed Time: %f seconds' % elapsed_time)
 
       # Cross validation
+      y_test = np.array(test_table.matrix_data.todense()).T
 
+      feed_dict={
+          Y_ph: y_test.astype(np.float32),
+          G_ph: test_metadata.values.astype(np.float32),
+          total_count: y_test.sum(axis=1).astype(np.float32)
+      }
+
+      pred_beta = qbeta.eval()
+      pred_gamma = qgamma.eval()
+      mse, mrc = cross_validation(test_metadata.values, pred_beta, pred_gamma, y_test)
+      print("MSE: %f, MRC: %f" % (mse, mrc))
 
 if __name__ == "__main__":
   tf.app.run()
