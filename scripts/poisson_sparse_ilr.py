@@ -6,14 +6,16 @@ from biom import load_table, Table
 
 from gneiss.balances import _balance_basis
 from gneiss.composition import ilr_transform
-from gneiss.util import match, match_tips, rename_internal_nodes
+from gneiss.util import match, rename_internal_nodes
 
-from tensorflow.contrib.distributions import Multinomial, Normal
+from tensorflow.contrib.distributions import Poisson, Normal
 from patsy import dmatrix
 from skbio import TreeNode
 from skbio.stats.composition import closure, clr_inv
 from scipy.stats import spearmanr
-from util import cross_validation
+from util import match_tips, sparse_balance_basis
+from util import cross_validation, get_batch
+from skbio.stats.composition import clr_inv
 import time
 
 
@@ -66,8 +68,8 @@ flags.DEFINE_integer("checkpoint_interval", 600,
                      "Checkpoint the model (i.e. save the parameters) every n "
                      "seconds (rounded up to statistics interval).")
 flags.DEFINE_boolean("verbose", False,
-                     "Specifies if cross validation and summaries are "
-                     "saved during training. ")
+                     "Specifies if cross validation and summaries "
+                     "are saved during training. ")
 FLAGS = flags.FLAGS
 
 
@@ -91,23 +93,23 @@ class Options(object):
       self.train_metadata = pd.read_table(self.train_metadata, index_col=0)
     elif isinstance(self.train_metadata, pd.DataFrame):
       self.train_metadata = self.train_metadata
-
     if isinstance(self.test_metadata, str):
       self.test_metadata = pd.read_table(self.test_metadata, index_col=0)
-    elif isinstance(self.test_metadata, pd.DataFrame):
+    elif isinstance(self.train_metadata, pd.DataFrame):
       self.test_metadata = self.test_metadata
 
     try:
-      if isinstance(self.tree_file, str):
-        self.tree = TreeNode.read(self.tree_file)
-      elif isinstance(self.tree_file, TreeNode):
-        self.tree = self.tree_file
+      if isinstance(self.tree, str):
+        self.tree = TreeNode.read(self.tree)
+      elif isinstance(self.tree, TreeNode):
+        self.tree = self.tree
     except:
       pass
 
+    self.formula = self.formula + "+0"
     if not os.path.exists(self.save_path):
       os.makedirs(self.save_path)
-    self.formula = self.formula + '+0'
+
 
 
 def main(_):
@@ -119,6 +121,7 @@ def main(_):
     train_metadata=FLAGS.train_metadata,
     test_metadata=FLAGS.test_metadata,
     formula=FLAGS.formula,
+    tree=FLAGS.tree,
     learning_rate=FLAGS.learning_rate,
     clipping_size=FLAGS.clipping_size,
     beta_mean=FLAGS.beta_mean,
@@ -134,6 +137,7 @@ def main(_):
     summary_interval=FLAGS.summary_interval,
     checkpoint_interval=FLAGS.checkpoint_interval
   )
+
   # preprocessing
   train_table, train_metadata = opts.train_table, opts.train_metadata
   train_metadata = train_metadata.loc[train_table.ids(axis='sample')]
@@ -150,23 +154,28 @@ def main(_):
   sort_f = lambda xs: [xs[train_metadata.index.get_loc(x)] for x in xs]
   train_table = train_table.sort(sort_f=sort_f, axis='sample')
   train_metadata = dmatrix(opts.formula, train_metadata, return_type='dataframe')
+  tree = opts.tree
+  train_table, tree = match_tips(train_table, tree)
+  basis, _ = sparse_balance_basis(tree)
+  basis = basis.T
 
   # hold out data preprocessing
   test_table, test_metadata = opts.test_table, opts.test_metadata
   metadata_filter = lambda val, id_, md: id_ in test_metadata.index
   obs_lookup = set(train_table.ids(axis='observation'))
   feat_filter = lambda val, id_, md: id_ in obs_lookup
-
   test_table = test_table.filter(metadata_filter, axis='sample')
   test_table = test_table.filter(feat_filter, axis='observation')
 
   sort_f = lambda xs: [xs[test_metadata.index.get_loc(x)] for x in xs]
   test_table = test_table.sort(sort_f=sort_f, axis='sample')
-  test_metadata = dmatrix(opts.formula, test_metadata, return_type='dataframe')
+  test_metadata = dmatrix(opts.formula, test_metadata,
+                          return_type='dataframe')
+  test_table, tree = match_tips(test_table, tree)
 
   p = train_metadata.shape[1]   # number of covariates
   G_data = train_metadata.values
-  y_data = np.array(train_table.matrix_data.todense()).T
+  y_data = train_table.matrix_data.tocoo().T
   N, D = y_data.shape
   save_path = opts.save_path
   learning_rate = opts.learning_rate
@@ -174,44 +183,82 @@ def main(_):
   gamma_mean, gamma_scale = opts.gamma_mean, opts.gamma_scale
   beta_mean, beta_scale = opts.beta_mean, opts.beta_scale
   num_iter = (N // batch_size) * opts.epochs_to_train
+  num_neg = opts.num_neg_samples
 
   # Model code
   with tf.Graph().as_default(), tf.Session() as session:
     with tf.device("/cpu:0"):
+
       # Place holder variables to accept input data
-      G_ph = tf.placeholder(tf.float32, [batch_size, p], name='G_ph')
-      Y_ph = tf.placeholder(tf.float32, [batch_size, D], name='Y_ph')
-      total_count = tf.placeholder(tf.float32, [batch_size], name='total_count')
+      Gpos_ph = tf.placeholder(tf.float32, [batch_size, p], name='G_pos')
+      Gneg_ph = tf.placeholder(tf.float32, [num_neg, p], name='G_neg')
+      Y_ph = tf.placeholder(tf.float32, [batch_size], name='Y_ph')
+      pos_row = tf.placeholder(tf.int32, shape=[batch_size], name='pos_row')
+      pos_col = tf.placeholder(tf.int32, shape=[batch_size], name='pos_col')
+      neg_row = tf.placeholder(tf.int32, shape=[num_neg], name='neg_row')
+      neg_col = tf.placeholder(tf.int32, shape=[num_neg], name='neg_col')
+      neg_data = tf.zeros(shape=[num_neg], name='neg_data', dtype=tf.float32)
+      total_zero = tf.constant(y_data.shape[0] * y_data.shape[1] - y_data.nnz,
+                               dtype=tf.float32)
+      total_nonzero = tf.constant(y_data.nnz, dtype=tf.float32)
 
       # Define PointMass Variables first
-      qgamma = tf.Variable(tf.random_normal([1, D]), name='qgamma')
-      qbeta = tf.Variable(tf.random_normal([p, D]), name='qB')
+      qgamma = tf.Variable(tf.random_normal([1, D-1]), name='qgamma')
+      qbeta = tf.Variable(tf.random_normal([p, D-1]), name='qB')
+      theta = tf.Variable(tf.random_normal([N, 1]), name='theta')
 
-      # Distributions
-      # species bias
-      gamma = Normal(loc=tf.zeros([1, D]) + gamma_mean,
-                     scale=tf.ones([1, D]) * gamma_scale,
+      # Distributions species bias
+      gamma = Normal(loc=tf.zeros([1, D-1]) + gamma_mean,
+                     scale=tf.ones([1, D-1]) * gamma_scale,
                      name='gamma')
       # regression coefficents distribution
-      beta = Normal(loc=tf.zeros([p, D]) + beta_mean,
-                    scale=tf.ones([p, D]) * beta_scale,
+      beta = Normal(loc=tf.zeros([p, D-1]) + beta_mean,
+                    scale=tf.ones([p, D-1]) * beta_scale,
                     name='B')
-
       Bprime = tf.concat([qgamma, qbeta], axis=0)
 
-      # add bias terms for samples
-      Gprime = tf.concat([tf.ones([batch_size, 1]), G_ph], axis=1)
+      # Add bias terms for samples
+      Gpos = tf.concat([tf.ones([batch_size, 1]), Gpos_ph], axis=1)
+      Gneg = tf.concat([tf.ones([num_neg, 1]), Gneg_ph], axis=1)
 
-      eta = tf.matmul(Gprime, Bprime)
-      phi = tf.nn.log_softmax(eta)
-      Y = Multinomial(total_count=total_count, logits=phi, name='Y')
+      # Convert basis to SparseTensor
+      psi = tf.SparseTensor(
+          indices=np.mat([basis.row, basis.col]).transpose(),
+          values=basis.data,
+          dense_shape=basis.shape)
 
-      loss = -(tf.reduce_mean(gamma.log_prob(qgamma)) + \
-               tf.reduce_mean(beta.log_prob(qbeta)) + \
-               tf.reduce_mean(Y.log_prob(Y_ph)))
+      V = tf.transpose(
+          tf.sparse_tensor_dense_matmul(psi, tf.transpose(Bprime))
+      )
+
+      # sparse matrix multiplication for positive samples
+      pos_prime = tf.reduce_sum(
+          tf.multiply(
+              Gpos, tf.transpose(
+                  tf.gather(V, pos_col, axis=1))),
+          axis=1)
+      pos_phi = tf.reshape(tf.gather(theta, pos_row),
+                           shape=[batch_size]) + pos_prime
+      Y = Poisson(log_rate=pos_phi, name='Y')
+
+      # sparse matrix multiplication for negative samples
+      neg_prime = tf.reduce_sum(
+          tf.multiply(
+              Gneg, tf.transpose(
+                  tf.gather(V, neg_col, axis=1))),
+          axis=1)
+      neg_phi = tf.reshape(tf.gather(theta, neg_row),
+                           shape=[num_neg]) + neg_prime
+      neg_poisson = Poisson(log_rate=neg_phi, name='neg_counts')
+
+      loss = -(
+          tf.reduce_mean(gamma.log_prob(qgamma)) + \
+          tf.reduce_mean(beta.log_prob(qbeta)) + \
+          tf.reduce_mean(Y.log_prob(Y_ph)) + \
+          tf.reduce_mean(neg_poisson.log_prob(neg_data))
+      )
 
       optimizer = tf.train.AdamOptimizer(learning_rate)
-
       gradients, variables = zip(*optimizer.compute_gradients(loss))
       gradients, _ = tf.clip_by_global_norm(gradients, opts.clipping_size)
       train = optimizer.apply_gradients(zip(gradients, variables))
@@ -219,29 +266,37 @@ def main(_):
       tf.summary.scalar('loss', loss)
       tf.summary.histogram('qbeta', qbeta)
       tf.summary.histogram('qgamma', qgamma)
+      tf.summary.histogram('theta', theta)
       merged = tf.summary.merge_all()
 
       tf.global_variables_initializer().run()
 
       writer = tf.summary.FileWriter(save_path, session.graph)
-
       losses = np.array([0.] * num_iter)
       idx = np.arange(train_metadata.shape[0])
       log_handle = open(os.path.join(save_path, 'run.log'), 'w')
       start_time = time.time()
       for i in range(num_iter):
-          batch_idx = np.random.choice(idx, size=batch_size)
-          feed_dict={
-              Y_ph: y_data[batch_idx].astype(np.float32),
-              G_ph: train_metadata.values[batch_idx].astype(np.float32),
-              total_count: y_data[batch_idx].sum(axis=1).astype(np.float32)
-          }
-          _, summary, train_loss, grads = session.run(
-            [train, merged, loss, gradients],
-            feed_dict=feed_dict
-          )
-          writer.add_summary(summary, i)
-          losses[i] = train_loss
+        batch_idx = np.random.choice(idx, size=batch_size)
+        batch = get_batch(batch_size, y_data, num_neg=num_neg)
+        (positive_row, positive_col, positive_data,
+         negative_row, negative_col, negative_data) = batch
+        feed_dict={
+          Y_ph: positive_data,
+          Gpos_ph: G_data[positive_row, :],
+          Gneg_ph: G_data[negative_row, :],
+          pos_row: positive_row,
+          pos_col: positive_col,
+          neg_row: negative_row,
+          neg_col: negative_col
+        }
+
+        _, summary, train_loss, grads = session.run(
+          [train, merged, loss, gradients],
+          feed_dict=feed_dict
+        )
+        writer.add_summary(summary, i)
+        losses[i] = train_loss
       elapsed_time = time.time() - start_time
       print('Elapsed Time: %f seconds' % elapsed_time)
 
@@ -250,7 +305,8 @@ def main(_):
 
       pred_beta = qbeta.eval()
       pred_gamma = qgamma.eval()
-      mse, mrc = cross_validation(test_metadata.values, pred_beta, pred_gamma, y_test)
+      mse, mrc = cross_validation(test_metadata.values, pred_beta @ basis.T,
+                                  pred_gamma @ basis.T, y_test)
       print("MSE: %f, MRC: %f" % (mse, mrc))
 
 

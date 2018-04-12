@@ -85,7 +85,6 @@ def simulate_poisson(
      sim_beta, sim_theta, sim_gamma, sim_kappa, sim_eps) = gen
 
     tree.write(tree_file)
-
     with biom_open(table_file, 'w') as f:
         table.to_hdf5(f, "simulation")
     metadata.to_csv(metadata_file, sep='\t')
@@ -184,6 +183,7 @@ def simulate_multinomial(
 def split_dataset(input_biom, input_metadata, split_ratio, output_dir):
     table = load_table(input_biom)
     metadata = pd.read_table(input_metadata, index_col=0)
+    metadata.columns = [x.replace('-', '_') for x in metadata.columns]
     sample_ids = metadata.index
     D, N = table.shape
     samples = pd.Series(np.arange(N), index=sample_ids)

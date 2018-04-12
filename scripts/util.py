@@ -4,6 +4,10 @@ import pandas as pd
 from sklearn.utils import check_random_state
 from scipy.sparse import coo_matrix
 from skbio.stats.composition import closure
+from gneiss.util import match, match_tips, rename_internal_nodes
+from patsy import dmatrix
+from skbio.stats.composition import clr_inv
+from scipy.stats import spearmanr
 
 
 def random_poisson_model(num_samples, num_features,
@@ -360,10 +364,8 @@ def match_tips(table, tree):
     skbio.TreeNode :
         Sub-tree with the common features.
     """
-
     tips = [x.name for x in tree.tips()]
     common_tips = set(tips) & set(table.ids(axis='observation'))
-
 
     _tree = tree.shear(names=list(common_tips))
 
@@ -376,3 +378,96 @@ def match_tips(table, tree):
     sort_f = lambda x: [n.name for n in _tree.tips()]
     _table = _table.sort(sort_f=sort_f, axis='observation')
     return _table, _tree
+
+def cross_validation(md, beta, gamma, data):
+    """ Computes two cross validation metrics
+
+    1) Rank difference
+    2) Mean squared error on observed entries
+
+    Parameters
+    ----------
+    md : np.array
+       Design matrix
+    beta : np.array
+       Regression coefficients
+    gamma : np.array
+       Regression intercepts
+    data : np.array
+       Dense matrix of counts.  Samples are rows
+       and features are columns.
+
+    Returns
+    -------
+    mse : float
+       Mean squared error across all of the cells in the matrix
+    mrc : float
+       Mean rank correlation.  This take the average spearman
+       correlation across every sample.  This boils down to matching
+       rank species curves per sample.
+    """
+    n = data.sum(axis=1).reshape(-1, 1)
+    pred = np.multiply(n, clr_inv(md @ beta + gamma))
+    mse = np.mean(np.ravel(data - pred)**2)
+    mrc = np.mean([
+        spearmanr(data[i, :], pred[i, :])[0]
+        for i in range(data.shape[0])
+    ])
+    return mse, mrc
+
+
+def get_batch(M, Y, num_neg=10):
+  """ Get's batch data
+
+  Parameters
+  ----------
+  M : int
+      batch size
+  Y : scipy.sparse.coo_matrix
+      Scipy sparse matrix in COO-format.
+  num_neg : int
+      Number of negative samples
+
+  Returns
+  -------
+  pos_row : np.array
+      Selected rows for positive values
+  pos_col : np.array
+      Selected columns for positive values
+  pos_data : np.array
+      Selected data for positive values
+  neg_row : np.array
+      Selected rows for negative values
+  neg_col : np.array
+      Selected columns for negative values
+  neg_data : np.array
+      Selected data for negative values
+  """
+  y_data = Y.data
+  y_row = Y.row
+  y_col = Y.col
+
+  # get positive sample
+  positive_idx = np.random.choice(len(y_data), M)
+  positive_row = y_row[positive_idx].astype(np.int32)
+  positive_col = y_col[positive_idx].astype(np.int32)
+  positive_data = y_data[positive_idx].astype(np.float32)
+
+  # store all of the positive (i, j) coords
+  idx = np.vstack((y_row, y_col)).T
+  idx = set(map(tuple, idx.tolist()))
+
+  # get negative sample
+  N, D = Y.shape
+  negative_row = np.zeros(num_neg, dtype=np.int32)
+  negative_col = np.zeros(num_neg, dtype=np.int32)
+  negative_data = np.zeros(num_neg, dtype=np.float32)
+  for k in range(num_neg):
+    i, j = np.random.randint(N), np.random.randint(D)
+    while (i, j) in idx:
+      i, j = np.random.randint(N), np.random.randint(D)
+      negative_row[k] = i
+      negative_col[k] = j
+
+  return (positive_row, positive_col, positive_data,
+          negative_row, negative_col, negative_data)
