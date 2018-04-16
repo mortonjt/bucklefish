@@ -171,8 +171,12 @@ def main(_):
   batch_size = opts.batch_size
   gamma_mean, gamma_scale = opts.gamma_mean, opts.gamma_scale
   beta_mean, beta_scale = opts.beta_mean, opts.beta_scale
-  num_iter = (N // batch_size) * opts.epochs_to_train
   num_neg = opts.num_neg_samples
+  clipping_size=opts.clipping_size
+
+  epoch = y_data.nnz // batch_size
+  num_iter = int(opts.epochs_to_train * epoch)
+
 
   # Model code
   with tf.Graph().as_default(), tf.Session() as session:
@@ -200,12 +204,12 @@ def main(_):
       # Distributions
       # species bias
       gamma = Normal(loc=tf.zeros([1, D]) + gamma_mean,
-                     scale=tf.ones([1, D]) * gamma_scale,
-                     name='gamma')
+                   scale=tf.ones([1, D]) * gamma_scale,
+                   name='gamma')
       # regression coefficents distribution
       beta = Normal(loc=tf.zeros([p, D]) + beta_mean,
-                    scale=tf.ones([p, D]) * beta_scale,
-                    name='B')
+                  scale=tf.ones([p, D]) * beta_scale,
+                  name='B')
 
       V = tf.concat([qgamma, qbeta], axis=0)
 
@@ -215,33 +219,34 @@ def main(_):
 
       # sparse matrix multiplication for positive samples
       pos_prime = tf.reduce_sum(
-          tf.multiply(
-              Gpos, tf.transpose(
-                  tf.gather(V, pos_col, axis=1))),
-          axis=1)
+        tf.multiply(
+            Gpos, tf.transpose(
+                tf.gather(V, pos_col, axis=1))),
+        axis=1)
       pos_phi = tf.reshape(tf.gather(theta, pos_row), shape=[batch_size]) + pos_prime
+
       Y = Poisson(log_rate=pos_phi, name='Y')
 
       # sparse matrix multiplication for negative samples
       neg_prime = tf.reduce_sum(
-          tf.multiply(
-              Gneg, tf.transpose(
-                  tf.gather(V, neg_col, axis=1))),
-          axis=1)
+        tf.multiply(
+            Gneg, tf.transpose(
+                tf.gather(V, neg_col, axis=1))),
+        axis=1)
       neg_phi = tf.reshape(tf.gather(theta, neg_row), shape=[num_neg]) + neg_prime
       neg_poisson = Poisson(log_rate=neg_phi, name='neg_counts')
 
       loss = -(
-          tf.reduce_mean(gamma.log_prob(qgamma)) + \
-          tf.reduce_mean(beta.log_prob(qbeta)) + \
-          tf.reduce_mean(Y.log_prob(Y_ph)) + \
-          tf.reduce_mean(neg_poisson.log_prob(neg_data))
+          tf.reduce_sum(gamma.log_prob(qgamma)) + \
+          tf.reduce_sum(beta.log_prob(qbeta)) + \
+          tf.reduce_sum(Y.log_prob(Y_ph)) * (total_nonzero / batch_size) + \
+          tf.reduce_sum(neg_poisson.log_prob(neg_data)) * (total_zero / num_neg)
       )
 
       optimizer = tf.train.AdamOptimizer(learning_rate)
 
       gradients, variables = zip(*optimizer.compute_gradients(loss))
-      gradients, _ = tf.clip_by_global_norm(gradients, opts.clipping_size)
+      gradients, _ = tf.clip_by_global_norm(gradients, clipping_size)
       train = optimizer.apply_gradients(zip(gradients, variables))
 
       tf.summary.scalar('loss', loss)
@@ -253,32 +258,43 @@ def main(_):
       tf.global_variables_initializer().run()
 
       writer = tf.summary.FileWriter(save_path, session.graph)
+      run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+      run_metadata = tf.RunMetadata()
 
       losses = np.array([0.] * num_iter)
       idx = np.arange(train_metadata.shape[0])
       log_handle = open(os.path.join(save_path, 'run.log'), 'w')
+      gen = get_batch(batch_size,
+                      N, D,
+                      y_data.data,
+                      y_data.row,
+                      y_data.col,
+                      num_neg=num_neg)
       start_time = time.time()
       for i in range(num_iter):
-        batch_idx = np.random.choice(idx, size=batch_size)
-        batch = get_batch(batch_size, y_data, num_neg=num_neg)
-        (positive_row, positive_col, positive_data,
-         negative_row, negative_col, negative_data) = batch
-        feed_dict={
-          Y_ph: positive_data,
-          Gpos_ph: G_data[positive_row, :],
-          Gneg_ph: G_data[negative_row, :],
-          pos_row: positive_row,
-          pos_col: positive_col,
-          neg_row: negative_row,
-          neg_col: negative_col
-        }
+          batch_idx = np.random.choice(idx, size=batch_size)
+          batch = next(gen)
+          (positive_row, positive_col, positive_data,
+           negative_row, negative_col, negative_data) = batch
+          feed_dict={
+              Y_ph: positive_data,
+              Gpos_ph: G_data[positive_row, :],
+              Gneg_ph: G_data[negative_row, :],
+              pos_row: positive_row,
+              pos_col: positive_col,
+              neg_row: negative_row,
+              neg_col: negative_col
+          }
 
-        _, summary, train_loss, grads = session.run(
-          [train, merged, loss, gradients],
-          feed_dict=feed_dict
-        )
-        writer.add_summary(summary, i)
-        losses[i] = train_loss
+          _, summary, train_loss, grads = session.run(
+              [train, merged, loss, gradients],
+              feed_dict=feed_dict,
+              options=run_options,
+              run_metadata=run_metadata
+          )
+          writer.add_summary(summary, i)
+          losses[i] = train_loss
+
       elapsed_time = time.time() - start_time
       print('Elapsed Time: %f seconds' % elapsed_time)
 

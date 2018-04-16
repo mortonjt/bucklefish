@@ -208,7 +208,7 @@ def main(_):
 
       loss = -(tf.reduce_mean(gamma.log_prob(qgamma)) + \
                tf.reduce_mean(beta.log_prob(qbeta)) + \
-               tf.reduce_mean(Y.log_prob(Y_ph)))
+               tf.reduce_mean(Y.log_prob(Y_ph)) * (N / batch_size))
 
       optimizer = tf.train.AdamOptimizer(learning_rate)
 
