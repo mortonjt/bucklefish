@@ -281,6 +281,8 @@ def main(_):
                       y_data.col,
                       num_neg=num_neg)
       start_time = time.time()
+      last_checkpoint_time = 0
+      saver = tf.train.Saver()
       for i in range(num_iter):
           batch_idx = np.random.choice(idx, size=batch_size)
           batch = next(gen)
@@ -316,6 +318,14 @@ def main(_):
                 feed_dict=feed_dict
             )
             writer.add_summary(summary, i)
+
+          now = time.time()
+          if now - last_checkpoint_time > checkpoint_interval:
+            saver.save(session,
+                       os.path.join(opts.save_path, "model.ckpt"),
+                       global_step=i)
+            last_checkpoint_time = now
+
           losses[i] = train_loss
 
       elapsed_time = time.time() - start_time

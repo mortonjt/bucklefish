@@ -176,6 +176,7 @@ def main(_):
   beta_mean, beta_scale = opts.beta_mean, opts.beta_scale
   num_iter = (N // batch_size) * opts.epochs_to_train
   holdout_size = test_metadata.shape[0]
+  checkpoint_interval = opts.checkpoint_interval
 
   # Model code
   with tf.Graph().as_default(), tf.Session() as session:
@@ -190,7 +191,6 @@ def main(_):
       # Define PointMass Variables first
       qgamma = tf.Variable(tf.random_normal([1, D]), name='qgamma')
       qbeta = tf.Variable(tf.random_normal([p, D]), name='qB')
-
 
       # Distributions
       # species bias
@@ -223,7 +223,8 @@ def main(_):
 
       with tf.name_scope('accuracy'):
         holdout_count = tf.reduce_sum(Y_holdout, axis=1)
-        pred =  tf.reshape(holdout_count, [-1, 1]) * tf.nn.softmax(tf.matmul(G_holdout, qbeta) + qgamma)
+        pred =  tf.reshape(holdout_count, [-1, 1]) * tf.nn.softmax(
+          tf.matmul(G_holdout, qbeta) + qgamma)
         mse = tf.reduce_mean(tf.squeeze(tf.abs(pred - Y_holdout)))
         tf.summary.scalar('mean_absolute_error', mse)
 
@@ -239,7 +240,10 @@ def main(_):
       losses = np.array([0.] * num_iter)
       idx = np.arange(train_metadata.shape[0])
       log_handle = open(os.path.join(save_path, 'run.log'), 'w')
+
+      last_checkpoint_time = 0
       start_time = time.time()
+      saver = tf.train.Saver()
       for i in range(num_iter):
           batch_idx = np.random.choice(idx, size=batch_size)
           feed_dict={
@@ -273,6 +277,14 @@ def main(_):
               feed_dict=feed_dict
             )
             writer.add_summary(summary, i)
+
+          now = time.time()
+          if now - last_checkpoint_time > checkpoint_interval:
+            saver.save(session,
+                       os.path.join(opts.save_path, "model.ckpt"),
+                       global_step=i)
+            last_checkpoint_time = now
+
           losses[i] = train_loss
       elapsed_time = time.time() - start_time
       print('Elapsed Time: %f seconds' % elapsed_time)
