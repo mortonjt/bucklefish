@@ -189,6 +189,7 @@ def main(_):
   epoch = y_data.nnz // batch_size
   num_iter = int(opts.epochs_to_train * epoch)
   holdout_size = test_metadata.shape[0]
+  checkpoint_interval = opts.checkpoint_interval
 
   # Model code
   with tf.Graph().as_default(), tf.Session() as session:
