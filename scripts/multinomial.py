@@ -146,7 +146,7 @@ def main(_):
   train_table = train_table.filter(metadata_filter, axis='sample')
   train_table = train_table.filter(sample_filter, axis='sample')
   train_table = train_table.filter(read_filter, axis='observation')
-
+  train_metadata = train_metadata.loc[train_table.ids(axis='sample')]
   sort_f = lambda xs: [xs[train_metadata.index.get_loc(x)] for x in xs]
   train_table = train_table.sort(sort_f=sort_f, axis='sample')
   train_metadata = dmatrix(opts.formula, train_metadata, return_type='dataframe')
@@ -159,7 +159,7 @@ def main(_):
 
   test_table = test_table.filter(metadata_filter, axis='sample')
   test_table = test_table.filter(feat_filter, axis='observation')
-
+  test_metadata = test_metadata.loc[test_table.ids(axis='sample')]
   sort_f = lambda xs: [xs[test_metadata.index.get_loc(x)] for x in xs]
   test_table = test_table.sort(sort_f=sort_f, axis='sample')
   test_metadata = dmatrix(opts.formula, test_metadata, return_type='dataframe')
@@ -167,6 +167,7 @@ def main(_):
   p = train_metadata.shape[1]   # number of covariates
   G_data = train_metadata.values
   y_data = np.array(train_table.matrix_data.todense()).T
+  y_test = np.array(test_table.matrix_data.todense()).T
   N, D = y_data.shape
   save_path = opts.save_path
   learning_rate = opts.learning_rate
@@ -174,6 +175,7 @@ def main(_):
   gamma_mean, gamma_scale = opts.gamma_mean, opts.gamma_scale
   beta_mean, beta_scale = opts.beta_mean, opts.beta_scale
   num_iter = (N // batch_size) * opts.epochs_to_train
+  holdout_size = test_metadata.shape[0]
 
   # Model code
   with tf.Graph().as_default(), tf.Session() as session:
@@ -181,11 +183,14 @@ def main(_):
       # Place holder variables to accept input data
       G_ph = tf.placeholder(tf.float32, [batch_size, p], name='G_ph')
       Y_ph = tf.placeholder(tf.float32, [batch_size, D], name='Y_ph')
+      G_holdout = tf.placeholder(tf.float32, [holdout_size, p], name='G_holdout')
+      Y_holdout = tf.placeholder(tf.float32, [holdout_size, D], name='Y_holdout')
       total_count = tf.placeholder(tf.float32, [batch_size], name='total_count')
 
       # Define PointMass Variables first
       qgamma = tf.Variable(tf.random_normal([1, D]), name='qgamma')
       qbeta = tf.Variable(tf.random_normal([p, D]), name='qB')
+
 
       # Distributions
       # species bias
@@ -216,6 +221,12 @@ def main(_):
       gradients, _ = tf.clip_by_global_norm(gradients, opts.clipping_size)
       train = optimizer.apply_gradients(zip(gradients, variables))
 
+      with tf.name_scope('accuracy'):
+        holdout_count = tf.reduce_sum(Y_holdout, axis=1)
+        pred =  tf.reshape(holdout_count, [-1, 1]) * tf.nn.softmax(tf.matmul(G_holdout, qbeta) + qgamma)
+        mse = tf.reduce_mean(tf.squeeze(tf.abs(pred - Y_holdout)))
+        tf.summary.scalar('mean_absolute_error', mse)
+
       tf.summary.scalar('loss', loss)
       tf.summary.histogram('qbeta', qbeta)
       tf.summary.histogram('qgamma', qgamma)
@@ -234,20 +245,39 @@ def main(_):
           feed_dict={
               Y_ph: y_data[batch_idx].astype(np.float32),
               G_ph: train_metadata.values[batch_idx].astype(np.float32),
+              Y_holdout: y_test.astype(np.float32),
+              G_holdout: test_metadata.values.astype(np.float32),
               total_count: y_data[batch_idx].sum(axis=1).astype(np.float32)
           }
-          _, summary, train_loss, grads = session.run(
-            [train, merged, loss, gradients],
-            feed_dict=feed_dict
-          )
-          writer.add_summary(summary, i)
+
+          if i % 1000 == 0:
+            run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+            run_metadata = tf.RunMetadata()
+            _, summary, train_loss, grads = session.run(
+              [train, merged, loss, gradients],
+              feed_dict=feed_dict,
+              options=run_options,
+              run_metadata=run_metadata
+            )
+            writer.add_run_metadata(run_metadata, 'step%d' % i)
+            writer.add_summary(summary, i)
+          elif i % 5000 == 0:
+            _, summary, err, train_loss, grads = session.run(
+              [train, mse, merged, loss, gradients],
+              feed_dict=feed_dict
+            )
+            writer.add_summary(summary, i)
+          else:
+            _, summary, train_loss, grads = session.run(
+              [train, merged, loss, gradients],
+              feed_dict=feed_dict
+            )
+            writer.add_summary(summary, i)
           losses[i] = train_loss
       elapsed_time = time.time() - start_time
       print('Elapsed Time: %f seconds' % elapsed_time)
 
       # Cross validation
-      y_test = np.array(test_table.matrix_data.todense()).T
-
       pred_beta = qbeta.eval()
       pred_gamma = qgamma.eval()
       mse, mrc = cross_validation(test_metadata.values, pred_beta, pred_gamma, y_test)
@@ -256,4 +286,3 @@ def main(_):
 
 if __name__ == "__main__":
   tf.app.run()
-

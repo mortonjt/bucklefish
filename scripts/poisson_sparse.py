@@ -145,7 +145,7 @@ def main(_):
   train_table = train_table.filter(metadata_filter, axis='sample')
   train_table = train_table.filter(sample_filter, axis='sample')
   train_table = train_table.filter(read_filter, axis='observation')
-
+  train_metadata = train_metadata.loc[train_table.ids(axis='sample')]
   sort_f = lambda xs: [xs[train_metadata.index.get_loc(x)] for x in xs]
   train_table = train_table.sort(sort_f=sort_f, axis='sample')
   train_metadata = dmatrix(opts.formula, train_metadata, return_type='dataframe')
@@ -157,7 +157,7 @@ def main(_):
   feat_filter = lambda val, id_, md: id_ in obs_lookup
   test_table = test_table.filter(metadata_filter, axis='sample')
   test_table = test_table.filter(feat_filter, axis='observation')
-
+  test_metadata = test_metadata.loc[test_table.ids(axis='sample')]
   sort_f = lambda xs: [xs[test_metadata.index.get_loc(x)] for x in xs]
   test_table = test_table.sort(sort_f=sort_f, axis='sample')
   test_metadata = dmatrix(opts.formula, test_metadata, return_type='dataframe')
@@ -165,6 +165,7 @@ def main(_):
   p = train_metadata.shape[1]   # number of covariates
   G_data = train_metadata.values
   y_data = train_table.matrix_data.tocoo().T
+  y_test = np.array(test_table.matrix_data.todense()).T
   N, D = y_data.shape
   save_path = opts.save_path
   learning_rate = opts.learning_rate
@@ -176,7 +177,7 @@ def main(_):
 
   epoch = y_data.nnz // batch_size
   num_iter = int(opts.epochs_to_train * epoch)
-
+  holdout_size = test_metadata.shape[0]
 
   # Model code
   with tf.Graph().as_default(), tf.Session() as session:
@@ -184,7 +185,10 @@ def main(_):
 
       Gpos_ph = tf.placeholder(tf.float32, [batch_size, p], name='G_pos')
       Gneg_ph = tf.placeholder(tf.float32, [num_neg, p], name='G_neg')
+      G_holdout = tf.placeholder(tf.float32, [holdout_size, p], name='G_holdout')
+      Y_holdout = tf.placeholder(tf.float32, [holdout_size, D], name='Y_holdout')
       Y_ph = tf.placeholder(tf.float32, [batch_size], name='Y_ph')
+
       pos_row = tf.placeholder(tf.int32, shape=[batch_size], name='pos_row')
       pos_col = tf.placeholder(tf.int32, shape=[batch_size], name='pos_col')
       neg_row = tf.placeholder(tf.int32, shape=[num_neg], name='neg_row')
@@ -249,6 +253,12 @@ def main(_):
       gradients, _ = tf.clip_by_global_norm(gradients, clipping_size)
       train = optimizer.apply_gradients(zip(gradients, variables))
 
+      with tf.name_scope('accuracy'):
+        holdout_count = tf.reduce_sum(Y_holdout, axis=1)
+        pred =  tf.reshape(holdout_count, [-1, 1]) * tf.nn.softmax(tf.matmul(G_holdout, qbeta) + qgamma)
+        mse = tf.reduce_mean(tf.squeeze(tf.abs(pred - Y_holdout)))
+        tf.summary.scalar('mean_absolute_error', mse)
+
       tf.summary.scalar('loss', loss)
       tf.summary.histogram('qbeta', qbeta)
       tf.summary.histogram('qgamma', qgamma)
@@ -278,6 +288,8 @@ def main(_):
            negative_row, negative_col, negative_data) = batch
           feed_dict={
               Y_ph: positive_data,
+              Y_holdout: y_test.astype(np.float32),
+              G_holdout: test_metadata.values.astype(np.float32),
               Gpos_ph: G_data[positive_row, :],
               Gneg_ph: G_data[negative_row, :],
               pos_row: positive_row,
@@ -285,23 +297,31 @@ def main(_):
               neg_row: negative_row,
               neg_col: negative_col
           }
-
-          _, summary, train_loss, grads = session.run(
-              [train, merged, loss, gradients],
-              feed_dict=feed_dict,
-              options=run_options,
-              run_metadata=run_metadata
-          )
-          writer.add_summary(summary, i)
+          if i % 1000 == 0:
+            _, summary, train_loss, grads = session.run(
+                [train, merged, loss, gradients],
+                feed_dict=feed_dict,
+                options=run_options,
+                run_metadata=run_metadata
+            )
+          elif i % 5000 == 0:
+            _, summary, err, train_loss, grads = session.run(
+              [train, mse, merged, loss, gradients],
+              feed_dict=feed_dict
+            )
+            writer.add_summary(summary, i)
+          else:
+            _, summary, train_loss, grads = session.run(
+                [train, merged, loss, gradients],
+                feed_dict=feed_dict
+            )
+            writer.add_summary(summary, i)
           losses[i] = train_loss
 
       elapsed_time = time.time() - start_time
       print('Elapsed Time: %f seconds' % elapsed_time)
 
       # Cross validation
-      y_test = np.array(test_table.matrix_data.todense()).T
-      #y_test = train_table.matrix_data.tocoo().T
-
       pred_beta = qbeta.eval()
       pred_gamma = qgamma.eval()
       mse, mrc = cross_validation(test_metadata.values, pred_beta, pred_gamma, y_test)
