@@ -140,32 +140,36 @@ def main(_):
   sample_filter = lambda val, id_, md: (
     (id_ in train_metadata.index) and np.sum(val) > opts.min_sample_count)
   read_filter = lambda val, id_, md: np.sum(val) > opts.min_feature_count
-  metadata_filter = lambda val, id_, md: id_ in train_metadata.index
 
-  train_table = train_table.filter(metadata_filter, axis='sample')
+  # Filter low abundance samples and features
   train_table = train_table.filter(sample_filter, axis='sample')
   train_table = train_table.filter(read_filter, axis='observation')
+  train_metadata = dmatrix(opts.formula, train_metadata, return_type='dataframe')
   train_metadata = train_metadata.loc[train_table.ids(axis='sample')]
+  # Match samples
+  metadata_filter = lambda val, id_, md: id_ in train_metadata.index
+  train_table = train_table.filter(metadata_filter, axis='sample')
   sort_f = lambda xs: [xs[train_metadata.index.get_loc(x)] for x in xs]
   train_table = train_table.sort(sort_f=sort_f, axis='sample')
-  train_metadata = dmatrix(opts.formula, train_metadata, return_type='dataframe')
 
   # hold out data preprocessing
   test_table, test_metadata = opts.test_table, opts.test_metadata
   metadata_filter = lambda val, id_, md: id_ in test_metadata.index
   obs_lookup = set(train_table.ids(axis='observation'))
   feat_filter = lambda val, id_, md: id_ in obs_lookup
-  test_table = test_table.filter(metadata_filter, axis='sample')
+  # Match samples  
   test_table = test_table.filter(feat_filter, axis='observation')
+  test_metadata = dmatrix(opts.formula, test_metadata, return_type='dataframe')
   test_metadata = test_metadata.loc[test_table.ids(axis='sample')]
+  metadata_filter = lambda val, id_, md: id_ in test_metadata.index
+  test_table = test_table.filter(metadata_filter, axis='sample')
   sort_f = lambda xs: [xs[test_metadata.index.get_loc(x)] for x in xs]
   test_table = test_table.sort(sort_f=sort_f, axis='sample')
-  test_metadata = dmatrix(opts.formula, test_metadata, return_type='dataframe')
 
   p = train_metadata.shape[1]   # number of covariates
   G_data = train_metadata.values
   y_data = train_table.matrix_data.tocoo().T
-  y_test = np.array(test_table.matrix_data.todense()).T
+  y_test = test_table.matrix_data.tocoo().T
   N, D = y_data.shape
   save_path = opts.save_path
   learning_rate = opts.learning_rate
@@ -179,6 +183,9 @@ def main(_):
   num_iter = int(opts.epochs_to_train * epoch)
   holdout_size = test_metadata.shape[0]
   checkpoint_interval = opts.checkpoint_interval
+  print('train_table', y_data.shape)
+  print('test_table', y_test.shape)
+  print('G_data', G_data.shape)
 
   # Model code
   with tf.Graph().as_default(), tf.Session() as session:

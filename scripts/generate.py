@@ -184,6 +184,11 @@ def split_dataset(input_biom, input_metadata, split_ratio, output_dir):
     table = load_table(input_biom)
     metadata = pd.read_table(input_metadata, index_col=0)
     metadata.columns = [x.replace('-', '_') for x in metadata.columns]
+
+    metadata_filter = lambda val, id_, md: id_ in metadata.index
+    table = table.filter(metadata_filter, axis='sample')
+    metadata = metadata.loc[table.ids(axis='sample')]
+
     sample_ids = metadata.index
     D, N = table.shape
     samples = pd.Series(np.arange(N), index=sample_ids)
