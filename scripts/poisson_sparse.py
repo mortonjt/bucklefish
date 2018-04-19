@@ -66,7 +66,8 @@ flags.DEFINE_integer("checkpoint_interval", 600,
                      "Checkpoint the model (i.e. save the parameters) every n "
                      "seconds (rounded up to statistics interval).")
 flags.DEFINE_boolean("verbose", False,
-                     "Specifies if cross validation and summaries are saved during training. ")
+                     "Specifies if cross validation and summaries "
+                     "are saved during training. ")
 FLAGS = flags.FLAGS
 
 
@@ -135,20 +136,14 @@ def main(_):
   )
   # preprocessing
   train_table, train_metadata = opts.train_table, opts.train_metadata
-  train_metadata = train_metadata.loc[train_table.ids(axis='sample')]
 
   sample_filter = lambda val, id_, md: (
     (id_ in train_metadata.index) and np.sum(val) > opts.min_sample_count)
   read_filter = lambda val, id_, md: np.sum(val) > opts.min_feature_count
-  metadata_filter = lambda val, id_, md: id_ in train_metadata.index
-
-  train_table = train_table.filter(metadata_filter, axis='sample')
   train_table = train_table.filter(sample_filter, axis='sample')
   train_table = train_table.filter(read_filter, axis='observation')
-  train_metadata = train_metadata.loc[train_table.ids(axis='sample')]
-  sort_f = lambda xs: [xs[train_metadata.index.get_loc(x)] for x in xs]
-  train_table = train_table.sort(sort_f=sort_f, axis='sample')
   train_metadata = dmatrix(opts.formula, train_metadata, return_type='dataframe')
+  train_table, train_metadata = match(train_table, train_metadata)
 
   # hold out data preprocessing
   test_table, test_metadata = opts.test_table, opts.test_metadata
@@ -157,10 +152,15 @@ def main(_):
   feat_filter = lambda val, id_, md: id_ in obs_lookup
   test_table = test_table.filter(metadata_filter, axis='sample')
   test_table = test_table.filter(feat_filter, axis='observation')
-  test_metadata = test_metadata.loc[test_table.ids(axis='sample')]
-  sort_f = lambda xs: [xs[test_metadata.index.get_loc(x)] for x in xs]
-  test_table = test_table.sort(sort_f=sort_f, axis='sample')
   test_metadata = dmatrix(opts.formula, test_metadata, return_type='dataframe')
+  test_table, test_metadata = match(test_table, test_metadata)
+
+  # pad extra columns with zeros, so that we can still make predictions
+  extra_columns = list(set(train_metadata.columns) - set(test_metadata.columns))
+  df = pd.DataFrame({C: np.zeros(test_metadata.shape[0])
+                     for C in extra_columns}, index=test_metadata.index)
+
+  test_metadata = pd.concat((test_metadata, df), axis=1)
 
   p = train_metadata.shape[1]   # number of covariates
   G_data = train_metadata.values
@@ -182,161 +182,161 @@ def main(_):
 
   # Model code
   with tf.Graph().as_default(), tf.Session() as session:
-    with tf.device("/cpu:0"):
 
-      Gpos_ph = tf.placeholder(tf.float32, [batch_size, p], name='G_pos')
-      Gneg_ph = tf.placeholder(tf.float32, [num_neg, p], name='G_neg')
-      G_holdout = tf.placeholder(tf.float32, [holdout_size, p], name='G_holdout')
-      Y_holdout = tf.placeholder(tf.float32, [holdout_size, D], name='Y_holdout')
-      Y_ph = tf.placeholder(tf.float32, [batch_size], name='Y_ph')
+    Gpos_ph = tf.placeholder(tf.float32, [batch_size, p], name='G_pos')
+    Gneg_ph = tf.placeholder(tf.float32, [num_neg, p], name='G_neg')
+    G_holdout = tf.placeholder(tf.float32, [holdout_size, p], name='G_holdout')
+    Y_holdout = tf.placeholder(tf.float32, [holdout_size, D], name='Y_holdout')
 
-      pos_row = tf.placeholder(tf.int32, shape=[batch_size], name='pos_row')
-      pos_col = tf.placeholder(tf.int32, shape=[batch_size], name='pos_col')
-      neg_row = tf.placeholder(tf.int32, shape=[num_neg], name='neg_row')
-      neg_col = tf.placeholder(tf.int32, shape=[num_neg], name='neg_col')
+    Y_ph = tf.placeholder(tf.float32, [batch_size], name='Y_ph')
 
-      neg_data = tf.zeros(shape=[num_neg], name='neg_data', dtype=tf.float32)
-      total_zero = tf.constant(y_data.shape[0] * y_data.shape[1] - y_data.nnz,
-                               dtype=tf.float32)
-      total_nonzero = tf.constant(y_data.nnz, dtype=tf.float32)
+    pos_row = tf.placeholder(tf.int32, shape=[batch_size], name='pos_row')
+    pos_col = tf.placeholder(tf.int32, shape=[batch_size], name='pos_col')
+    neg_row = tf.placeholder(tf.int32, shape=[num_neg], name='neg_row')
+    neg_col = tf.placeholder(tf.int32, shape=[num_neg], name='neg_col')
 
-      # Define PointMass Variables first
-      qgamma = tf.Variable(tf.random_normal([1, D]), name='qgamma')
-      # sample bias (for overdispersion)
-      theta = tf.Variable(tf.random_normal([N, 1]), name='theta')
-      qbeta = tf.Variable(tf.random_normal([p, D]), name='qB')
+    neg_data = tf.zeros(shape=[num_neg], name='neg_data', dtype=tf.float32)
+    total_zero = tf.constant(y_data.shape[0] * y_data.shape[1] - y_data.nnz,
+                             dtype=tf.float32)
+    total_nonzero = tf.constant(y_data.nnz, dtype=tf.float32)
 
-      # Distributions
-      # species bias
-      gamma = Normal(loc=tf.zeros([1, D]) + gamma_mean,
-                   scale=tf.ones([1, D]) * gamma_scale,
-                   name='gamma')
-      # regression coefficents distribution
-      beta = Normal(loc=tf.zeros([p, D]) + beta_mean,
-                  scale=tf.ones([p, D]) * beta_scale,
-                  name='B')
+    # Define PointMass Variables first
+    qgamma = tf.Variable(tf.random_normal([1, D]), name='qgamma')
+    # sample bias (for overdispersion)
+    theta = tf.Variable(tf.random_normal([N, 1]), name='theta')
+    qbeta = tf.Variable(tf.random_normal([p, D]), name='qB')
 
-      V = tf.concat([qgamma, qbeta], axis=0)
+    # Distributions
+    # species bias
+    gamma = Normal(loc=tf.zeros([1, D]) + gamma_mean,
+                 scale=tf.ones([1, D]) * gamma_scale,
+                 name='gamma')
+    # regression coefficents distribution
+    beta = Normal(loc=tf.zeros([p, D]) + beta_mean,
+                scale=tf.ones([p, D]) * beta_scale,
+                name='B')
 
-      # add bias terms for samples
-      Gpos = tf.concat([tf.ones([batch_size, 1]), Gpos_ph], axis=1)
-      Gneg = tf.concat([tf.ones([num_neg, 1]), Gneg_ph], axis=1)
+    V = tf.concat([qgamma, qbeta], axis=0)
 
-      # sparse matrix multiplication for positive samples
-      pos_prime = tf.reduce_sum(
-        tf.multiply(
-            Gpos, tf.transpose(
-                tf.gather(V, pos_col, axis=1))),
-        axis=1)
-      pos_phi = tf.reshape(tf.gather(theta, pos_row), shape=[batch_size]) + pos_prime
+    # add bias terms for samples
+    Gpos = tf.concat([tf.ones([batch_size, 1]), Gpos_ph], axis=1)
+    Gneg = tf.concat([tf.ones([num_neg, 1]), Gneg_ph], axis=1)
 
-      Y = Poisson(log_rate=pos_phi, name='Y')
+    # sparse matrix multiplication for positive samples
+    pos_prime = tf.reduce_sum(
+      tf.multiply(
+          Gpos, tf.transpose(
+              tf.gather(V, pos_col, axis=1))),
+      axis=1)
+    pos_phi = tf.reshape(tf.gather(theta, pos_row), shape=[batch_size]) + pos_prime
 
-      # sparse matrix multiplication for negative samples
-      neg_prime = tf.reduce_sum(
-        tf.multiply(
-            Gneg, tf.transpose(
-                tf.gather(V, neg_col, axis=1))),
-        axis=1)
-      neg_phi = tf.reshape(tf.gather(theta, neg_row), shape=[num_neg]) + neg_prime
-      neg_poisson = Poisson(log_rate=neg_phi, name='neg_counts')
+    Y = Poisson(log_rate=pos_phi, name='Y')
 
-      loss = -(
-          tf.reduce_sum(gamma.log_prob(qgamma)) + \
-          tf.reduce_sum(beta.log_prob(qbeta)) + \
-          tf.reduce_sum(Y.log_prob(Y_ph)) * (total_nonzero / batch_size) + \
-          tf.reduce_sum(neg_poisson.log_prob(neg_data)) * (total_zero / num_neg)
-      )
+    # sparse matrix multiplication for negative samples
+    neg_prime = tf.reduce_sum(
+      tf.multiply(
+          Gneg, tf.transpose(
+              tf.gather(V, neg_col, axis=1))),
+      axis=1)
+    neg_phi = tf.reshape(tf.gather(theta, neg_row), shape=[num_neg]) + neg_prime
+    neg_poisson = Poisson(log_rate=neg_phi, name='neg_counts')
 
-      optimizer = tf.train.AdamOptimizer(learning_rate)
+    loss = -(
+        tf.reduce_sum(gamma.log_prob(qgamma)) + \
+        tf.reduce_sum(beta.log_prob(qbeta)) + \
+        tf.reduce_sum(Y.log_prob(Y_ph)) * (total_nonzero / batch_size) + \
+        tf.reduce_sum(neg_poisson.log_prob(neg_data)) * (total_zero / num_neg)
+    )
 
-      gradients, variables = zip(*optimizer.compute_gradients(loss))
-      gradients, _ = tf.clip_by_global_norm(gradients, clipping_size)
-      train = optimizer.apply_gradients(zip(gradients, variables))
+    optimizer = tf.train.AdamOptimizer(learning_rate)
+    gradients, variables = zip(*optimizer.compute_gradients(loss))
+    gradients, _ = tf.clip_by_global_norm(gradients, clipping_size)
+    train = optimizer.apply_gradients(zip(gradients, variables))
 
-      with tf.name_scope('accuracy'):
-        holdout_count = tf.reduce_sum(Y_holdout, axis=1)
-        pred =  tf.reshape(holdout_count, [-1, 1]) * tf.nn.softmax(tf.matmul(G_holdout, qbeta) + qgamma)
-        mse = tf.reduce_mean(tf.squeeze(tf.abs(pred - Y_holdout)))
-        tf.summary.scalar('mean_absolute_error', mse)
+    with tf.name_scope('accuracy'):
+      holdout_count = tf.reduce_sum(Y_holdout, axis=1)
+      pred =  tf.reshape(holdout_count, [-1, 1]) * tf.nn.softmax(
+        tf.matmul(G_holdout, qbeta) + qgamma)
+      mse = tf.reduce_mean(tf.squeeze(tf.abs(pred - Y_holdout)))
+      tf.summary.scalar('mean_absolute_error', mse)
 
-      tf.summary.scalar('loss', loss)
-      tf.summary.histogram('qbeta', qbeta)
-      tf.summary.histogram('qgamma', qgamma)
-      tf.summary.histogram('theta', theta)
-      merged = tf.summary.merge_all()
+    tf.summary.scalar('loss', loss)
+    tf.summary.histogram('qbeta', qbeta)
+    tf.summary.histogram('qgamma', qgamma)
+    tf.summary.histogram('theta', theta)
+    merged = tf.summary.merge_all()
 
-      tf.global_variables_initializer().run()
+    tf.global_variables_initializer().run()
 
-      writer = tf.summary.FileWriter(save_path, session.graph)
-      run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-      run_metadata = tf.RunMetadata()
+    writer = tf.summary.FileWriter(save_path, session.graph)
+    run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+    run_metadata = tf.RunMetadata()
 
-      losses = np.array([0.] * num_iter)
-      idx = np.arange(train_metadata.shape[0])
-      log_handle = open(os.path.join(save_path, 'run.log'), 'w')
-      gen = get_batch(batch_size,
-                      N, D,
-                      y_data.data,
-                      y_data.row,
-                      y_data.col,
-                      num_neg=num_neg)
-      start_time = time.time()
-      last_checkpoint_time = 0
-      saver = tf.train.Saver()
-      for i in range(num_iter):
-          batch_idx = np.random.choice(idx, size=batch_size)
-          batch = next(gen)
-          (positive_row, positive_col, positive_data,
-           negative_row, negative_col, negative_data) = batch
-          feed_dict={
-              Y_ph: positive_data,
-              Y_holdout: y_test.astype(np.float32),
-              G_holdout: test_metadata.values.astype(np.float32),
-              Gpos_ph: G_data[positive_row, :],
-              Gneg_ph: G_data[negative_row, :],
-              pos_row: positive_row,
-              pos_col: positive_col,
-              neg_row: negative_row,
-              neg_col: negative_col
-          }
-          if i % 1000 == 0:
-            _, summary, train_loss, grads = session.run(
-                [train, merged, loss, gradients],
-                feed_dict=feed_dict,
-                options=run_options,
-                run_metadata=run_metadata
-            )
-          elif i % 5000 == 0:
-            _, summary, err, train_loss, grads = session.run(
-              [train, mse, merged, loss, gradients],
+    losses = np.array([0.] * num_iter)
+    idx = np.arange(train_metadata.shape[0])
+    log_handle = open(os.path.join(save_path, 'run.log'), 'w')
+    gen = get_batch(batch_size,
+                    N, D,
+                    y_data.data,
+                    y_data.row,
+                    y_data.col,
+                    num_neg=num_neg)
+    start_time = time.time()
+    last_checkpoint_time = 0
+    saver = tf.train.Saver()
+    for i in range(num_iter):
+        batch_idx = np.random.choice(idx, size=batch_size)
+        batch = next(gen)
+        (positive_row, positive_col, positive_data,
+         negative_row, negative_col, negative_data) = batch
+        feed_dict={
+            Y_ph: positive_data,
+            Y_holdout: y_test.astype(np.float32),
+            G_holdout: test_metadata.values.astype(np.float32),
+            Gpos_ph: G_data[positive_row, :],
+            Gneg_ph: G_data[negative_row, :],
+            pos_row: positive_row,
+            pos_col: positive_col,
+            neg_row: negative_row,
+            neg_col: negative_col
+        }
+        if i % 1000 == 0:
+          _, summary, train_loss, grads = session.run(
+              [train, merged, loss, gradients],
+              feed_dict=feed_dict,
+              options=run_options,
+              run_metadata=run_metadata
+          )
+        elif i % 5000 == 0:
+          _, summary, err, train_loss, grads = session.run(
+            [train, mse, merged, loss, gradients],
+            feed_dict=feed_dict
+          )
+          writer.add_summary(summary, i)
+        else:
+          _, summary, train_loss, grads = session.run(
+              [train, merged, loss, gradients],
               feed_dict=feed_dict
-            )
-            writer.add_summary(summary, i)
-          else:
-            _, summary, train_loss, grads = session.run(
-                [train, merged, loss, gradients],
-                feed_dict=feed_dict
-            )
-            writer.add_summary(summary, i)
+          )
+          writer.add_summary(summary, i)
 
-          now = time.time()
-          if now - last_checkpoint_time > checkpoint_interval:
-            saver.save(session,
-                       os.path.join(opts.save_path, "model.ckpt"),
-                       global_step=i)
-            last_checkpoint_time = now
+        now = time.time()
+        if now - last_checkpoint_time > checkpoint_interval:
+          saver.save(session,
+                     os.path.join(opts.save_path, "model.ckpt"),
+                     global_step=i)
+          last_checkpoint_time = now
 
-          losses[i] = train_loss
+        losses[i] = train_loss
 
-      elapsed_time = time.time() - start_time
-      print('Elapsed Time: %f seconds' % elapsed_time)
+    elapsed_time = time.time() - start_time
+    print('Elapsed Time: %f seconds' % elapsed_time)
 
-      # Cross validation
-      pred_beta = qbeta.eval()
-      pred_gamma = qgamma.eval()
-      mse, mrc = cross_validation(test_metadata.values, pred_beta, pred_gamma, y_test)
-      print("MSE: %f, MRC: %f" % (mse, mrc))
+    # Cross validation
+    pred_beta = qbeta.eval()
+    pred_gamma = qgamma.eval()
+    mse, mrc = cross_validation(test_metadata.values, pred_beta, pred_gamma, y_test)
+    print("MSE: %f, MRC: %f" % (mse, mrc))
 
 
 if __name__ == "__main__":
