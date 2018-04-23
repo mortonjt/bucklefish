@@ -4,7 +4,7 @@ import pandas as pd
 from sklearn.utils import check_random_state
 from scipy.sparse import coo_matrix
 from skbio.stats.composition import closure
-from gneiss.util import match, match_tips, rename_internal_nodes
+from gneiss.util import match, rename_internal_nodes
 from patsy import dmatrix
 from skbio.stats.composition import clr_inv
 from scipy.stats import spearmanr
@@ -339,6 +339,30 @@ def sparse_balance_basis(tree):
 
     return basis, nodes
 
+def match(table, metadata):
+    """ Makes sure that the metadata and the biom table have the
+    exact same samples in the same order
+
+    Parameters
+    ----------
+    table : biom.Table
+        Input biom table
+    metadata : pd.DataFrame
+        Input metadata table
+
+    Returns
+    -------
+    out_table : biom.Table
+        Output matched biom table
+    out_metadata : pd.DataFrame
+        Output matched metadata table
+    """
+    ids = list(set(train_table.ids(axis='sample')) & set(train_metadata.index))
+    out_metadata = metadata.loc[ids]
+    metadata_filter = lambda val, id_, md: id_ in out_metadata.index
+    sort_f = lambda xs: [xs[out_metadata.index.get_loc(x)] for x in xs]
+    out_table = train_table.sort(sort_f=sort_f, axis='sample')
+    return out_table, out_metadata
 
 def match_tips(table, tree):
     """ Returns the contingency table and tree with matched tips.
