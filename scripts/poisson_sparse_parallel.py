@@ -232,14 +232,15 @@ class PoissonRegression(object):
     # All of the entries in the sparse matrix is a possible class
     # But only the non-zero entries are true classes
     N, D = y_data.dense_shape
-    rows = tf.gather(y_data.indices, 0, axis=0)
-    cols = tf.gather(y_data.indices, 1, axis=0)
+    rows = tf.gather(y_data.indices, 0, axis=1)
+    cols = tf.gather(y_data.indices, 1, axis=1)
     rc_major = tf.cast(rows * D + cols, dtype=tf.int32)
     nnz = y_data.indices.shape[0]
 
     # Collect samples from y_data
     true_batch_ids = tf.random_uniform([opts.batch_size], maxval=nnz, dtype=tf.int32)
-    true_ids = tf.gather(rc_major, true_batch_ids)
+    print(rc_major.shape, true_batch_ids.shape)
+    true_ids = tf.gather(rc_major, true_batch_ids, axis=0)
     true_labels = tf.cast(tf.reshape(true_ids, [opts.batch_size, 1]), dtype=tf.int64)
     # Then run tf.nn.uniform_candidate_sampler to sample
     # the negative samples
@@ -254,47 +255,40 @@ class PoissonRegression(object):
     true_acc, samp_acc, w = tf.nn.compute_accidental_hits(
       true_labels, sampled_ids, num_true=1)
 
+    # basically this will be added to the negative samples
+    # to double count, this way, any positive examples that
+    # were sampled as negative samples will be removed.
     hit_ids = tf.gather(rc_major, true_acc)
-
-    print(sampled_ids.shape)
-    print(samp_acc.shape)
-    sampled_ids = tf.sets.set_difference(sampled_ids, samp_acc)
 
     # cast the sampled results back to row, col, data tuples
     # and return the batch
-    true_rows = tf.floor_mod(true_ids, D)
-    true_cols = tf.mod(true_ids, D)
-    true_data = tf.gather(y_data.data, true_batch_ids)
+    true_rows = tf.cast(tf.floormod(true_ids, D), dtype=tf.int64)
+    true_cols = tf.cast(tf.mod(true_ids, D), dtype=tf.int64)
+    true_data = tf.gather(y_data.values, true_batch_ids)
 
-    hit_rows = tf.floor_mod(hit_ids, D)
-    hit_cols = tf.mod(hit_ids, D)
-    hit_data = tf.gather(y_data.data, hit_ids)
+    hit_rows = tf.cast(tf.floormod(hit_ids, D), dtype=tf.int64)
+    hit_cols = tf.cast(tf.mod(hit_ids, D), dtype=tf.int64)
+    hit_data = tf.gather(y_data.values, hit_ids)
 
-    samp_rows = tf.floor_mod(sampled_ids, D)
-    samp_cols = tf.mod(sampled_ids, D)
-    samp_data = tf.zeros([sampled_ids.shape[0]])
+    samp_rows = tf.cast(tf.floormod(sampled_ids, D), dtype=tf.int64)
+    samp_cols = tf.cast(tf.mod(sampled_ids, D), dtype=tf.int64)
+    samp_data = tf.zeros([sampled_ids.shape[0]], dtype=tf.int32)
 
-    positive_batch = tf.SparseTensorValue(
+    positive_batch = tf.SparseTensor(
       indices=tf.transpose(tf.stack([true_rows, true_cols], axis=0)),
       values=true_data,
       dense_shape=[opts.batch_size, D]
     )
 
-    negative_batch = tf.SparseTensorValue(
-      indices=tf.transpose(
-        tf.stack(
-          [
-            tf.stack([hit_rows, samp_rows], axis=1),
-            tf.stack([hit_cols, samp_cols], axis=1)
-          ],
-          axis=1
-        )
-      ),
-      values=tf.stack([hit_data, samp_data], axis=1),
-      dense_shape=[opts.num_neg_samples, D]
+    negative_batch = tf.SparseTensor(
+      indices=tf.transpose(tf.stack([samp_rows, samp_cols], axis=0)),
+      values=samp_data,
+      dense_shape=[opts.batch_size, D]
     )
-    return positive_batch, negative_batch
 
+    accident_batch = (hit_rows, hit_cols, hit_data)
+
+    return positive_batch, negative_batch, accident_batch
 
   def loss(self):
     pass
