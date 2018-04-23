@@ -235,15 +235,27 @@ class PoissonRegression(object):
     rows = tf.gather(y_data.indices, 0, axis=1)
     cols = tf.gather(y_data.indices, 1, axis=1)
     rc_major = tf.cast(rows * D + cols, dtype=tf.int32)
+
     nnz = y_data.indices.shape[0]
 
     # Collect samples from y_data
-    true_batch_ids = tf.random_uniform([opts.batch_size], maxval=nnz, dtype=tf.int32)
-    print(rc_major.shape, true_batch_ids.shape)
+    true_batch_ids = tf.random_uniform(
+      [opts.batch_size], maxval=nnz, dtype=tf.int32)
     true_ids = tf.gather(rc_major, true_batch_ids, axis=0)
-    true_labels = tf.cast(tf.reshape(true_ids, [opts.batch_size, 1]), dtype=tf.int64)
-    # Then run tf.nn.uniform_candidate_sampler to sample
-    # the negative samples
+
+    # cast the sampled results back to row, col, data tuples
+    # and return the batch
+    true_rows = tf.cast(tf.floordiv(true_ids, D), dtype=tf.int64,
+                        name='positive_rows')
+    true_cols = tf.cast(tf.floormod(true_ids, D), dtype=tf.int64,
+                        name='positive_cols')
+    true_data = tf.gather(y_data.values, true_batch_ids,
+                          name='positive_data')
+
+    true_labels = tf.cast(tf.reshape(true_ids, [opts.batch_size, 1]),
+                          dtype=tf.int64)
+
+    # Then run tf.nn.uniform_candidate_sampler to sample the negative samples
     sampled_ids, _, _ = tf.nn.uniform_candidate_sampler(
       true_classes=true_labels,
       num_true=1,
@@ -259,39 +271,30 @@ class PoissonRegression(object):
     # to double count, this way, any positive examples that
     # were sampled as negative samples will be removed.
     hit_ids = tf.gather(rc_major, true_acc)
+    hit_rows = tf.cast(tf.floordiv(hit_ids, D), dtype=tf.int64,
+                       name='hit_rows')
+    hit_cols = tf.cast(tf.floormod(hit_ids, D), dtype=tf.int64,
+                       name='hit_cols')
+    hit_data = tf.gather(y_data.values, true_acc,
+                         name='hit_data')
 
-    # cast the sampled results back to row, col, data tuples
-    # and return the batch
-    true_rows = tf.cast(tf.floormod(true_ids, D), dtype=tf.int64)
-    true_cols = tf.cast(tf.mod(true_ids, D), dtype=tf.int64)
-    true_data = tf.gather(y_data.values, true_batch_ids)
+    samp_rows = tf.cast(tf.floordiv(sampled_ids, D), dtype=tf.int64,
+                        name='negative_rows')
+    samp_cols = tf.cast(tf.floormod(sampled_ids, D), dtype=tf.int64,
+                        name='negative_cols')
+    samp_data = tf.zeros([sampled_ids.shape[0]], dtype=tf.int32,
+                        name='negative_data')
 
-    hit_rows = tf.cast(tf.floormod(hit_ids, D), dtype=tf.int64)
-    hit_cols = tf.cast(tf.mod(hit_ids, D), dtype=tf.int64)
-    hit_data = tf.gather(y_data.values, hit_ids)
-
-    samp_rows = tf.cast(tf.floormod(sampled_ids, D), dtype=tf.int64)
-    samp_cols = tf.cast(tf.mod(sampled_ids, D), dtype=tf.int64)
-    samp_data = tf.zeros([sampled_ids.shape[0]], dtype=tf.int32)
-
-    positive_batch = tf.SparseTensor(
-      indices=tf.transpose(tf.stack([true_rows, true_cols], axis=0)),
-      values=true_data,
-      dense_shape=[opts.batch_size, D]
-    )
-
-    negative_batch = tf.SparseTensor(
-      indices=tf.transpose(tf.stack([samp_rows, samp_cols], axis=0)),
-      values=samp_data,
-      dense_shape=[opts.batch_size, D]
-    )
-
+    positive_batch = (true_rows, true_cols, true_data)
     accident_batch = (hit_rows, hit_cols, hit_data)
+    negative_batch = (samp_rows, samp_cols, samp_data)
 
     return positive_batch, negative_batch, accident_batch
 
+
   def loss(self):
     pass
+
 
   def inference(self, train_table, train_metadata):
     """ Builds computation graph for the model.
