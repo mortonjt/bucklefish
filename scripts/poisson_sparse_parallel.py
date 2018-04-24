@@ -126,49 +126,71 @@ class PoissonRegression(object):
     self.sess = session
 
   def initialize(self):
-    data = self.preprocess()
-    train_table, train_metadata, test_table, test_metadata = data
-    self.build_compute_graph(train_table, train_metadata)
-    self.build_eval_graph(test_table, test_metadata)
+    # preprocessing (i.e. biom table, metadata, ...)
+    (y_data, y_test, G_data, G_test) = self.preprocess(
+      opts.formula,
+      opts.train_table, opts.train_metadata,
+      opts.test_table, opts.test_metadata,
+      opts.min_sample_counts, opts.min_feature_count
+    )
 
-  def preprocess(self):
+    batch = self.sample(
+      y_data, num_pos=opts.batch_size, num_neg=opts.num_neg_samples
+    )
+
+    self.log_loss = self.loss(G_data, y_data, batch)
+    self.train = self.optimize(self.log_loss)
+    self.mse = self.evaluation_graph(G_test, y_test)
+
+  def preprocess(self, formula,
+                 train_table, train_metadata,
+                 test_table, test_metadata,
+                 min_sample_counts=10, min_feature_count=10):
     """ Performs data preprocessing.
 
-    Returns
-    -------
+    Parameters
+    ----------
+    formula : str
+       Statistical formula specifying the design matrix of covariates
+       in the study design.
     train_table : biom.Table
-       Training biom dataset.
+       Biom table containing the feature counts within the training dataset.
     train_metadata : pd.DataFrame
-       Sample metadata corresponding to training biom datasets.
+       Sample metadata table containing all of the measured covariates in
+       the training dataset.
     test_table : biom.Table
-       Testing biom dataset for cross validatione evaluation.
+       Biom table containing the feature counts within the holdout dataset.
     test_metadata : pd.DataFrame
-       Sample metadata corresponding to test biom datasets.
+       Sample metadata table containing all of the measured covariates in
+       the holdout test dataset.
+    min_sample_counts : int
+       Minimum number of total counts within a sample to be kept.
+    min_feature_counts : int
+       Minimum number of total counts within a feature to be kept.
 
     Notes
     -----
     This assumes that the biom tables can fit into memory - will
     require some extra consideration when this is no longer the case.
     """
-    opts = self.opts
     # preprocessing
-    train_table, train_metadata = opts.train_table, opts.train_metadata
+    train_table, train_metadata = train_table, train_metadata
     sample_filter = lambda val, id_, md: (
-      (id_ in train_metadata.index) and np.sum(val) > opts.min_sample_count)
-    read_filter = lambda val, id_, md: np.sum(val) > opts.min_feature_count
+      (id_ in train_metadata.index) and np.sum(val) > min_sample_count)
+    read_filter = lambda val, id_, md: np.sum(val) > min_feature_count
     train_table = train_table.filter(sample_filter, axis='sample')
     train_table = train_table.filter(read_filter, axis='observation')
-    train_metadata = dmatrix(opts.formula, train_metadata, return_type='dataframe')
+    train_metadata = dmatrix(formula, train_metadata, return_type='dataframe')
     train_table, train_metadata = match(train_table, train_metadata)
 
     # hold out data preprocessing
-    test_table, test_metadata = opts.test_table, opts.test_metadata
+    test_table, test_metadata = test_table, test_metadata
     metadata_filter = lambda val, id_, md: id_ in test_metadata.index
     obs_lookup = set(train_table.ids(axis='observation'))
     feat_filter = lambda val, id_, md: id_ in obs_lookup
     test_table = test_table.filter(metadata_filter, axis='sample')
     test_table = test_table.filter(feat_filter, axis='observation')
-    test_metadata = dmatrix(opts.formula, test_metadata, return_type='dataframe')
+    test_metadata = dmatrix(formula, test_metadata, return_type='dataframe')
     test_table, test_metadata = match(test_table, test_metadata)
 
     # pad extra columns with zeros, so that we can still make predictions
@@ -176,24 +198,7 @@ class PoissonRegression(object):
     df = pd.DataFrame({C: np.zeros(test_metadata.shape[0])
                        for C in extra_columns}, index=test_metadata.index)
     test_metadata = pd.concat((test_metadata, df), axis=1)
-    return train_table, train_metadata, test_table, test_metadata
 
-  def parse(self, train_table, train_metadata, test_table, test_metadata):
-    """ Initializes placeholders and constant vectors.
-
-    Parameters
-    ----------
-    train_table : biom.Table
-      Training feature data in biom format.
-    train_metadata : pd.DataFrame
-      Training sample metadata where rows are samples and columns
-      correspond to covariates.
-    test_table : biom.Table
-      Testing feature data in biom format.
-    test_metadata : pd.DataFrame
-      Testing sample metadata where rows are samples and columns
-      correspond to covariates.
-    """
     biom_data = train_table.matrix_data.tocoo().T
     y_data = tf.SparseTensorValue(
       indices=np.array([biom_data.row,  biom_data.col]).T,
@@ -205,18 +210,20 @@ class PoissonRegression(object):
     y_test = tf.constant(np.array(test_table.matrix_data.todense()).T,
                          dtype=tf.float32)
 
-    self.y_data = y_data
-    self.y_test = y_test
-    self.G_data = G_data
-    self.G_test = G_test
+    return y_data, y_test, G_data, G_test
 
-  def batch(self, y_data):
+
+  def sample(self, y_data, num_pos=50, num_neg=10):
     """ Creates a minibatch made up of positive and negative examples.
 
     Parameters
     ----------
     y_data : tf.SparseTensor
        Sparse tensor to sample
+    num_pos : int
+       Number of positive examples in a batch
+    num_neg : int
+       Number of negative examples in a batch.
 
     Returns
     -------
@@ -224,6 +231,20 @@ class PoissonRegression(object):
        Sparse tensor of positive examples
     negative_batch
        Sparse tensor of negative examples
+    accident_batch
+       Sparse tensor of accidental positive examples.
+       These are examples that are claimed to be negative,
+       but are actually positive.  This is corrected downstream
+       in the `inference` module.  These are added to
+       to the negative batch to correct the accident.
+       Since Poisson(0) + Poisson(k) = Poisson(k), this should
+       be equivalent.  Blame Google for this ugly hack.
+    num_exp_pos
+       Number of expected positive hits.  This is useful for
+       scaling the minibatches appropriately.
+    num_exp_neg
+       Number of expected negative hits. This is useful for
+       scaling the minibatches appropriately.
     """
     opts = self.opts
 
@@ -256,7 +277,7 @@ class PoissonRegression(object):
                           dtype=tf.int64)
 
     # Then run tf.nn.uniform_candidate_sampler to sample the negative samples
-    sampled_ids, _, _ = tf.nn.uniform_candidate_sampler(
+    sampled_ids, num_exp_pos, num_exp_neg = tf.nn.uniform_candidate_sampler(
       true_classes=true_labels,
       num_true=1,
       num_sampled=opts.num_neg_samples,
@@ -285,81 +306,66 @@ class PoissonRegression(object):
     samp_data = tf.zeros([sampled_ids.shape[0]], dtype=tf.int32,
                         name='negative_data')
 
-    positive_batch = (true_rows, true_cols, true_data)
-    accident_batch = (hit_rows, hit_cols, hit_data)
-    negative_batch = (samp_rows, samp_cols, samp_data)
+    positive_batch = tf.SparseTensor(
+      indices=tf.concat([tf.reshape(true_rows, [-1, 1]),
+                         tf.reshape(true_cols, [-1, 1])], axis=1),
+      values=true_data, dense_shape=[N, D])
 
-    return positive_batch, negative_batch, accident_batch
+    accident_batch = tf.SparseTensor(
+      indices=tf.concat([tf.reshape(hit_rows, [-1, 1]),
+                         tf.reshape(hit_cols, [-1, 1])], axis=1),
+      values=hit_data, dense_shape=[N, D])
+
+    negative_batch = tf.SparseTensor(
+      indices=tf.concat([tf.reshape(samp_rows, [-1, 1]),
+                         tf.reshape(samp_cols, [-1, 1])], axis=1),
+      values=samp_data, dense_shape=[N, D])
+
+    return (positive_batch, negative_batch, accident_batch,
+            num_exp_pos, num_exp_neg)
 
 
-  def loss(self):
-    pass
-
-
-  def inference(self, train_table, train_metadata):
+  def inference(self, G_data, obs_id):
     """ Builds computation graph for the model.
 
+    Parameters
+    ----------
+    G_data : tf.Tensor
+       Design matrix of covariates over samples.
+       Covariates are columns and rows are samples.
+    obs_id : tf.Tensor
+       Observation id.  This also corresponds to the column id.
+
+    Returns
+    -------
+    y_pred : tf.Tensor
+       Predicted counts
     """
+    # unpack batches
     opts = self.opts
+
     # more preprocessing
-    p = train_metadata.shape[1]   # number of covariates
-    G_data = train_metadata.values
-    y_data = train_table.matrix_data.tocoo().T
-    y_test = np.array(test_table.matrix_data.todense()).T
-    N, D = y_data.shape
-    save_path = opts.save_path
+    p = G_data.shape[1]   # number of covariates
+    N, D = opts.y_data.dense_shape
+
+    pos_col = obs_id
+
     learning_rate = opts.learning_rate
     batch_size = opts.batch_size
     gamma_mean, gamma_scale = opts.gamma_mean, opts.gamma_scale
     beta_mean, beta_scale = opts.beta_mean, opts.beta_scale
-    num_neg = opts.num_neg_samples
-    clipping_size=opts.clipping_size
 
-    epoch = y_data.nnz // batch_size
-    num_iter = int(opts.epochs_to_train * epoch)
-    holdout_size = test_metadata.shape[0]
-    checkpoint_interval = opts.checkpoint_interval
-
-    # actual model code
-    pos_row, pos_col, Y_ph = self.iterator.get_next()
-
-    self.G_ph = tf.placeholder(tf.float32, [N, p], name='G_ph')
-
-    Gpos_ph = tf.placeholder(tf.float32, [batch_size, p], name='G_pos')
-    Gneg_ph = tf.placeholder(tf.float32, [num_neg, p], name='G_neg')
-    Y_ph = tf.placeholder(tf.float32, [batch_size], name='Y_ph')
-
-    pos_row = tf.placeholder(tf.int32, shape=[batch_size], name='pos_row')
-    pos_col = tf.placeholder(tf.int32, shape=[batch_size], name='pos_col')
-    neg_row = tf.placeholder(tf.int32, shape=[num_neg], name='neg_row')
-    neg_col = tf.placeholder(tf.int32, shape=[num_neg], name='neg_col')
-
-    neg_data = tf.zeros(shape=[num_neg], name='neg_data', dtype=tf.float32)
-    total_zero = tf.constant(y_data.shape[0] * y_data.shape[1] - y_data.nnz,
-                             dtype=tf.float32)
-    total_nonzero = tf.constant(y_data.nnz, dtype=tf.float32)
-
-    # Define PointMass Variables first
+    # Regression coefficients
     qgamma = tf.Variable(tf.random_normal([1, D]), name='qgamma')
+    qbeta = tf.Variable(tf.random_normal([p, D]), name='qB')
 
     # sample bias (for overdispersion)
     theta = tf.Variable(tf.random_normal([N, 1]), name='theta')
-    qbeta = tf.Variable(tf.random_normal([p, D]), name='qB')
-
-    # Distributions species bias
-    gamma = Normal(loc=tf.zeros([1, D]) + gamma_mean,
-                 scale=tf.ones([1, D]) * gamma_scale,
-                 name='gamma')
-    # regression coefficents distribution
-    beta = Normal(loc=tf.zeros([p, D]) + beta_mean,
-                scale=tf.ones([p, D]) * beta_scale,
-                name='B')
 
     V = tf.concat([qgamma, qbeta], axis=0)
 
     # add bias terms for samples
     Gpos = tf.concat([tf.ones([batch_size, 1]), Gpos_ph], axis=1)
-    Gneg = tf.concat([tf.ones([num_neg, 1]), Gneg_ph], axis=1)
 
     # sparse matrix multiplication for positive samples
     pos_prime = tf.reduce_sum(
@@ -367,11 +373,84 @@ class PoissonRegression(object):
           Gpos, tf.transpose(
               tf.gather(V, pos_col, axis=1))),
       axis=1)
-    pos_phi = tf.reshape(tf.gather(theta, pos_row), shape=[batch_size]) + pos_prime
+    y_pred = pos_prime
 
-    Y = Poisson(log_rate=pos_phi, name='Y')
+    # save parameters to model
+    self.qbeta = qbeta
+    self.qgamma = qgamma
+    self.theta = theta
+
+    return y_pred
+
+
+  def loss(self, G_data, y_data, batch):
+    """ Computes the loss
+
+    Parameters
+    ----------
+    G_data : tf.Tensor
+       Design matrix
+    y_data : tf.SparseTensor
+       Sparse tensor of counts
+    batch : tuple of tuple of tf.Tensor
+       The output from sample().  The tuple is decomposed as follows
+
+       positive_batch : tf.SparseTensor
+          Sparse tensor of positive examples
+       negative_batch : tf.SparseTensor
+          Sparse tensor of negative examples
+       accident_batch : tf.SparseTensor
+          Sparse tensor of accidental positive examples.
+          These are examples that are claimed to be negative,
+          but are actually positive.  This is corrected downstream
+          in the `inference` module.  These are added to
+          to the negative batch to correct the accident.
+          Since Poisson(0) + Poisson(k) = Poisson(k), this should
+          be equivalent.  Blame Google for this ugly hack.
+       num_exp_pos : int
+          Number of expected positive hits.  This is useful for
+          scaling the minibatches appropriately.
+       num_exp_neg : int
+          Number of expected negative hits. This is useful for
+          scaling the minibatches appropriately.
+    """
+
+    (positive_batch, negative_batch, accident_batch,
+     num_exp_pos, num_exp_neg) = batch
+
+    pos_row, pos_col, pos_data = positive_batch
+    neg_row, neg_col, neg_data = negative_batch
+    acc_row, acc_col, acc_data = accident_batch
+
+    batch_size = pos_row.shape[0]
+    num_neg = neg_row.shape[0]
+
+    Gpos = tf.gather(G_data, pos_row, axis=1)
+    ypred = inference(Gpos, pos_col)
+
+    qbeta, qgamma, theta = self.qbeta, self.qgamma, self.theta
+
+    # add sample bias
+    ypred += tf.reshape(tf.gather(theta, pos_row), shape=[batch_size])
+
+    total_zero = tf.constant(y_data.shape[0] * y_data.shape[1] - y_data.nnz,
+                             dtype=tf.float32)
+    total_nonzero = tf.constant(y_data.nnz, dtype=tf.float32)
+
+    pos_poisson = Poisson(log_rate=y_pred, name='Y')
+
+    # Distributions species bias
+    gamma = Normal(loc=tf.zeros([1, D]) + gamma_mean,
+                   scale=tf.ones([1, D]) * gamma_scale,
+                   name='gamma')
+    # regression coefficents distribution
+    beta = Normal(loc=tf.zeros([p, D]) + beta_mean,
+                  scale=tf.ones([p, D]) * beta_scale,
+                  name='B')
 
     # sparse matrix multiplication for negative samples
+    Gneg = tf.gather(G_data, neg_row, axis=1)
+    Gneg = tf.concat([tf.ones([num_neg, 1]), Gneg], axis=1)
     neg_prime = tf.reduce_sum(
       tf.multiply(
           Gneg, tf.transpose(
@@ -380,82 +459,93 @@ class PoissonRegression(object):
     neg_phi = tf.reshape(tf.gather(theta, neg_row), shape=[num_neg]) + neg_prime
     neg_poisson = Poisson(log_rate=neg_phi, name='neg_counts')
 
-    loss = -(
-        tf.reduce_sum(gamma.log_prob(qgamma)) + \
-        tf.reduce_sum(beta.log_prob(qbeta)) + \
-        tf.reduce_sum(Y.log_prob(Y_ph)) * (total_nonzero / batch_size) + \
-        tf.reduce_sum(neg_poisson.log_prob(neg_data)) * (total_zero / num_neg)
+    # accident samples
+    acc_prime = tf.reduce_sum(
+      tf.multiply(
+          Gacc, tf.transpose(
+              tf.gather(V, acc_col, axis=1))),
+      axis=1)
+    acc_phi = tf.reshape(tf.gather(theta, acc_row), shape=[num_acc]) + acc_prime
+    acc_poisson = Poisson(log_rate=acc_phi, name='acc_counts')
+
+    log_loss = -(
+      tf.reduce_sum(gamma.log_prob(qgamma)) + \
+      tf.reduce_sum(beta.log_prob(qbeta)) + \
+      tf.reduce_sum(pos_poisson.log_prob(Y_ph)) * (total_nonzero / num_exp_pos) + \
+      (tf.reduce_sum(neg_poisson.log_prob(neg_data)) + \
+       tf.reduce_sum(acc_poisson.log_prob(acc_data))) * (total_zero / num_exp_neg)
     )
+    return log_loss
+
+  def optimize(self, log_loss):
+    opts = self.options
+
+    learning_rate = opts.learning_rate
+    clipping_size=opts.clipping_size
 
     optimizer = tf.train.AdamOptimizer(learning_rate)
-    gradients, variables = zip(*optimizer.compute_gradients(loss))
+    gradients, variables = zip(*optimizer.compute_gradients(log_loss))
     gradients, _ = tf.clip_by_global_norm(gradients, clipping_size)
     train = optimizer.apply_gradients(zip(gradients, variables))
+    return train
 
-    self.qbeta = qbeta
-    self.qgamma = qgamma
-    self.loss = loss
-    self.train = train
+  def evaluation(self, G_holdout, Y_holdout):
+    """ Perform cross validation on the hold-out set.
 
-
-  def build_eval_graph(self):
-    G_holdout = tf.placeholder(tf.float32, [holdout_size, p], name='G_holdout')
-    Y_holdout = tf.placeholder(tf.float32, [holdout_size, D], name='Y_holdout')
-
-    # evaluate the accuracy
-    with tf.name_scope('accuracy'):
-      holdout_count = tf.reduce_sum(Y_holdout, axis=1)
-      pred =  tf.reshape(holdout_count, [-1, 1]) * tf.nn.softmax(
-        tf.matmul(G_holdout, qbeta) + qgamma)
-
-      mse = tf.reduce_mean(tf.squeeze(tf.abs(pred - Y_holdout)))
-      tf.summary.scalar('mean_absolute_error', mse)
-
-
-  def train(self, gen):
-    """ Trains a single batch
+    This calculates the mean absolute error.
 
     Parameters
     ----------
-    gen : iterator
-       Generates batches.
+    G_holdout : tf.Tensor
+       Sample metadata for the hold-out test dataset
+    Y_holdout : tf.Tensor
+       Dense feature table for the hold-out test dataset
 
+    Returns
+    -------
+    mad : tf.Tensor
+       Mean absolute deviation.  This represents the average error
+       for each cell value in the matrix.
     """
+    qbeta = self.qbeta
+    qgamma = self.qgamma
+
+    # evaluate the accuracy
+    holdout_count = tf.reduce_sum(Y_holdout, axis=1)
+    pred =  tf.reshape(holdout_count, [-1, 1]) * tf.nn.softmax(
+      tf.matmul(G_holdout, qbeta) + qgamma)
+
+    mse = tf.reduce_mean(tf.squeeze(tf.abs(pred - Y_holdout)))
+    tf.summary.scalar('mean_absolute_error', mse)
+    return mse
+
+  def train(self):
+    """ Trains a single batch """
     opts = self.opts
     batch_size = opts.batch_size
     checkpoint_interval = opts.checkpoint_interval
 
-    batch_idx = np.random.choice(idx, size=batch_size)
-    batch = next(gen)
-    (positive_row, positive_col, positive_data,
-     negative_row, negative_col, negative_data) = batch
-    feed_dict={
-        Y_ph: positive_data,
-        Y_holdout: y_test.astype(np.float32),
-        G_holdout: test_metadata.values.astype(np.float32),
-        Gpos_ph: G_data[positive_row, :],
-        Gneg_ph: G_data[negative_row, :],
-        pos_row: positive_row,
-        pos_col: positive_col,
-        neg_row: negative_row,
-        neg_col: negative_col
-    }
+    (positive_batch, negative_batch, accident_batch,
+     num_exp_pos, num_exp_neg) = batch(self.y_data)
+
     if i % 1000 == 0:
-      _, summary, train_loss, grads = session.run(
-          [train, merged, loss, gradients],
+      # store runtime information
+      _, summary, train_loss = session.run(
+          [self.train, merged, loss],
           feed_dict=feed_dict,
           options=run_options,
           run_metadata=run_metadata
       )
     elif i % 5000 == 0:
-      _, summary, err, train_loss, grads = session.run(
-        [train, mse, merged, loss, gradients],
+      # store loss information and cross-validation information
+      _, summary, err, train_loss = session.run(
+        [train, mse, merged, loss],
         feed_dict=feed_dict
       )
       writer.add_summary(summary, i)
     else:
-      _, summary, train_loss, grads = session.run(
-          [train, merged, loss, gradients],
+      _ = session.run(
+          [train],
           feed_dict=feed_dict
       )
       writer.add_summary(summary, i)
@@ -466,10 +556,6 @@ class PoissonRegression(object):
                  os.path.join(opts.save_path, "model.ckpt"),
                  global_step=i)
       self.last_checkpoint_time = now
-
-
-  def eval(self):
-    pass
 
 
 def main(_):
@@ -496,7 +582,7 @@ def main(_):
     summary_interval=FLAGS.summary_interval,
     checkpoint_interval=FLAGS.checkpoint_interval
   )
-
+  save_path = opts.save_path
   p = train_metadata.shape[1]   # number of covariates
   G_data = train_metadata.values
   y_data = train_table.matrix_data.tocoo().T
@@ -505,6 +591,7 @@ def main(_):
   save_path = opts.save_path
   learning_rate = opts.learning_rate
   batch_size = opts.batch_size
+
   gamma_mean, gamma_scale = opts.gamma_mean, opts.gamma_scale
   beta_mean, beta_scale = opts.beta_mean, opts.beta_scale
   num_neg = opts.num_neg_samples
