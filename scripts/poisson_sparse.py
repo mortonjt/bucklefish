@@ -13,7 +13,7 @@ from patsy import dmatrix
 from skbio import TreeNode
 from skbio.stats.composition import closure, clr_inv
 from scipy.stats import spearmanr
-from util import cross_validation, get_batch
+from util import cross_validation, subsampler
 import time
 
 
@@ -275,12 +275,9 @@ def main(_):
     losses = np.array([0.] * num_iter)
     idx = np.arange(train_metadata.shape[0])
     log_handle = open(os.path.join(save_path, 'run.log'), 'w')
-    gen = get_batch(batch_size,
-                    N, D,
-                    y_data.data,
-                    y_data.row,
-                    y_data.col,
-                    num_neg=num_neg)
+    gen = subsampler(y_data,
+                     num_pos=batch_size,
+                     num_neg=num_neg)
     start_time = time.time()
     last_checkpoint_time = 0
     saver = tf.train.Saver()
@@ -288,7 +285,7 @@ def main(_):
         batch_idx = np.random.choice(idx, size=batch_size)
         batch = next(gen)
         (positive_row, positive_col, positive_data,
-         negative_row, negative_col, negative_data) = batch
+         negative_row, negative_col) = batch
         feed_dict={
             Y_ph: positive_data,
             Y_holdout: y_test.astype(np.float32),

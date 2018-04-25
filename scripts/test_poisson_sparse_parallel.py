@@ -29,6 +29,9 @@ class PoissonRegressionTest(tf.test.TestCase):
                 )
 
                 model = PoissonRegression(opts, sess)
+                model.N = N
+                model.D = D
+
                 pos, neg, acc, p, n = model.sample(y_data)
                 pos_res, neg_res, acc_res = sess.run(
                     [pos, neg, acc]
