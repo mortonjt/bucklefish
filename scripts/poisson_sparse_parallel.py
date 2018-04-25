@@ -13,7 +13,7 @@ from patsy import dmatrix
 from skbio import TreeNode
 from skbio.stats.composition import closure, clr_inv
 from scipy.stats import spearmanr
-from util import cross_validation, get_batch
+from util import cross_validation
 import time
 
 
@@ -210,6 +210,12 @@ class PoissonRegression(object):
     y_test = tf.constant(np.array(test_table.matrix_data.todense()).T,
                          dtype=tf.float32)
 
+    # D = number of features.  N = number of samples
+    # num_nonzero = number of nonzero entries in the table.
+    self.D, self.N = train_table.shape
+    self.p = G_data.shape[1]
+    self.num_nonzero = train_table.nnz
+
     return y_data, y_test, G_data, G_test
 
 
@@ -334,7 +340,8 @@ class PoissonRegression(object):
        Design matrix of covariates over samples.
        Covariates are columns and rows are samples.
     obs_id : tf.Tensor
-       Observation id.  This also corresponds to the column id.
+       Observation id.  This also corresponds to the
+       column id in the sparse matrix.
 
     Returns
     -------
@@ -345,33 +352,35 @@ class PoissonRegression(object):
     opts = self.opts
 
     # more preprocessing
-    p = G_data.shape[1]   # number of covariates
-    N, D = opts.y_data.dense_shape
+    # how to actually get this???
+    p = self.p
+    N, D = self.N, self.D
 
     pos_col = obs_id
 
-    learning_rate = opts.learning_rate
     batch_size = opts.batch_size
     gamma_mean, gamma_scale = opts.gamma_mean, opts.gamma_scale
     beta_mean, beta_scale = opts.beta_mean, opts.beta_scale
 
     # Regression coefficients
     qgamma = tf.Variable(tf.random_normal([1, D]), name='qgamma')
-    qbeta = tf.Variable(tf.random_normal([p, D]), name='qB')
+    qbeta = tf.Variable(tf.random_normal([p, D]), name='qbeta')
 
     # sample bias (for overdispersion)
     theta = tf.Variable(tf.random_normal([N, 1]), name='theta')
-
-    V = tf.concat([qgamma, qbeta], axis=0)
+    V = tf.concat([qgamma, qbeta], axis=0, name='V')
 
     # add bias terms for samples
-    Gpos = tf.concat([tf.ones([batch_size, 1]), Gpos_ph], axis=1)
+    Gpos = tf.concat(
+      [tf.ones([batch_size, 1]), G_data],
+      axis=1, name='Gpos')
 
+    Vprime = tf.transpose(
+      tf.gather(V, pos_col, axis=1), name='Vprime')
     # sparse matrix multiplication for positive samples
     pos_prime = tf.reduce_sum(
       tf.multiply(
-          Gpos, tf.transpose(
-              tf.gather(V, pos_col, axis=1))),
+          Gpos, Vprime),
       axis=1)
     y_pred = pos_prime
 
@@ -392,7 +401,7 @@ class PoissonRegression(object):
        Design matrix
     y_data : tf.SparseTensor
        Sparse tensor of counts
-    batch : tuple of tuple of tf.Tensor
+    batch : tuple of results tf.Tensor
        The output from sample().  The tuple is decomposed as follows
 
        positive_batch : tf.SparseTensor
@@ -414,29 +423,35 @@ class PoissonRegression(object):
           Number of expected negative hits. This is useful for
           scaling the minibatches appropriately.
     """
-
     (positive_batch, negative_batch, accident_batch,
      num_exp_pos, num_exp_neg) = batch
+    N, D = self.N, self.D
+    num_nonzero = self.num_nonzero
+    # unpack sparse tensors
+    pos_data = positive_batch.values  # nonzero examples
+    pos_row = tf.gather(positive_batch.indices, 0, axis=1)
+    pos_col = tf.gather(positive_batch.indices, 1, axis=1)
+    neg_data = negative_batch.values  # zero examples
+    neg_row = tf.gather(negative_batch.indices, 0, axis=1)
+    neg_col = tf.gather(negative_batch.indices, 1, axis=1)
+    acc_data = accident_batch.values  # accident examples
+    acc_row = tf.gather(accident_batch.indices, 0, axis=1)
+    acc_col = tf.gather(accident_batch.indices, 1, axis=1)
 
-    pos_row, pos_col, pos_data = positive_batch
-    neg_row, neg_col, neg_data = negative_batch
-    acc_row, acc_col, acc_data = accident_batch
+    batch_size, num_neg = pos_row.shape[0], neg_row.shape[0]
 
-    batch_size = pos_row.shape[0]
-    num_neg = neg_row.shape[0]
-
-    Gpos = tf.gather(G_data, pos_row, axis=1)
-    ypred = inference(Gpos, pos_col)
-
+    # obtain prediction to then calculate loss
+    Gpos = tf.gather(G_data, pos_row, axis=0)
+    ypred = self.inference(Gpos, pos_col)
     qbeta, qgamma, theta = self.qbeta, self.qgamma, self.theta
 
+    # Actual calculation of loss is below.
     # add sample bias
     ypred += tf.reshape(tf.gather(theta, pos_row), shape=[batch_size])
 
-    total_zero = tf.constant(y_data.shape[0] * y_data.shape[1] - y_data.nnz,
+    total_zero = tf.constant(N*D - num_nonzero,
                              dtype=tf.float32)
-    total_nonzero = tf.constant(y_data.nnz, dtype=tf.float32)
-
+    total_nonzero = tf.constant(num_nonzero, dtype=tf.float32)
     pos_poisson = Poisson(log_rate=y_pred, name='Y')
 
     # Distributions species bias
@@ -489,7 +504,7 @@ class PoissonRegression(object):
     train = optimizer.apply_gradients(zip(gradients, variables))
     return train
 
-  def evaluation(self, G_holdout, Y_holdout):
+  def evaluate(self, G_holdout, Y_holdout):
     """ Perform cross validation on the hold-out set.
 
     This calculates the mean absolute error.
@@ -647,3 +662,10 @@ def main(_):
 
 if __name__ == "__main__":
   tf.app.run()
+
+# Two parts to tensorflow (look at convolutional.py)
+# __init__ = instance of class
+#            (set the configuration parameters)
+# __call__ = invoke the actual network
+#            (pass in the session + runtime parameters)
+#

@@ -447,17 +447,47 @@ def cross_validation(md, beta, gamma, data, k=50):
     return mse, mrc
 
 
-def get_batch(M, N, D, y_data, y_row, y_col, num_neg=10):
-    #y_data = Y.data
-    #y_row = Y.row
-    #y_col = Y.col
+def subsampler(data, num_pos=10, num_neg=10):
+    """ Obtain random batch size made up of positive and negative samples
+
+    Parameters
+    ----------
+    data : scipy.sparse.coo_matrix
+       Sparse matrix to obtain random samples from
+    num_pos : in
+       Number of positive samples
+    num_negative : in
+       Number of negative samples
+
+    Returns
+    -------
+    positive_row : np.array
+       Row ids of the positive samples
+    positive_col : np.array
+       Column ids of the positive samples
+    positive_data : np.array
+       Data values in the positive samples
+    negative_row : np.array
+       Row ids of the negative samples
+    negative_col : np.array
+       Column ids of the negative samples
+
+    Note
+    ----
+    We are not return negative data, since the negative values
+    are always zero.
+    """
+    N, D = data.shape
+    y_data = data.data
+    y_row = data.row
+    y_col = data.col
 
     # store all of the positive (i, j) coords
     idx = np.vstack((y_row, y_col)).T
     idx = set(map(tuple, idx.tolist()))
     while True:
         # get positive sample
-        positive_idx = np.random.choice(len(y_data), M)
+        positive_idx = np.random.choice(len(y_data), num_pos)
         positive_row = y_row[positive_idx].astype(np.int32)
         positive_col = y_col[positive_idx].astype(np.int32)
         positive_data = y_data[positive_idx].astype(np.float32)
@@ -465,7 +495,6 @@ def get_batch(M, N, D, y_data, y_row, y_col, num_neg=10):
         # get negative sample
         negative_row = np.zeros(num_neg, dtype=np.int32)
         negative_col = np.zeros(num_neg, dtype=np.int32)
-        negative_data = np.zeros(num_neg, dtype=np.float32)
         for k in range(num_neg):
             i, j = np.random.randint(N), np.random.randint(D)
             while (i, j) in idx:
@@ -474,4 +503,4 @@ def get_batch(M, N, D, y_data, y_row, y_col, num_neg=10):
                 negative_col[k] = j
 
         yield (positive_row, positive_col, positive_data,
-               negative_row, negative_col, negative_data)
+               negative_row, negative_col)

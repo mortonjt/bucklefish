@@ -16,7 +16,6 @@ from scipy.stats import spearmanr
 from util import match_tips, sparse_balance_basis
 from util import cross_validation, get_batch
 from skbio.stats.composition import clr_inv
-from tqdm import tqdm
 import time
 
 
@@ -169,13 +168,11 @@ def main(_):
   test_table = test_table.filter(feat_filter, axis='observation')
   test_metadata = test_metadata.loc[test_table.ids(axis='sample')]
   sort_f = lambda xs: [xs[test_metadata.index.get_loc(x)] for x in xs]
-  sort_col = lambda xs: train_table.ids(axis='observation')
   test_table = test_table.sort(sort_f=sort_f, axis='sample')
-  test_table = test_table.sort(sort_f=sort_col, axis='observation')
   test_metadata = dmatrix(opts.formula, test_metadata,
                           return_type='dataframe')
-  
-  print('data loaded')
+  test_table, tree = match_tips(test_table, tree)
+
   p = train_metadata.shape[1]   # number of covariates
   G_data = train_metadata.values
   y_data = train_table.matrix_data.tocoo().T
@@ -310,7 +307,7 @@ def main(_):
       last_checkpoint_time = 0
       start_time = time.time()
       saver = tf.train.Saver()
-      for i in tqdm(range(num_iter)):
+      for i in range(num_iter):
           batch_idx = np.random.choice(idx, size=batch_size)
           batch = next(gen)
           (positive_row, positive_col, positive_data,
