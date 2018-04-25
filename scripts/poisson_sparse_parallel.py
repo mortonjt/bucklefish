@@ -442,7 +442,7 @@ class PoissonRegression(object):
     acc_row = tf.gather(accident_batch.indices, 0, axis=1)
     acc_col = tf.gather(accident_batch.indices, 1, axis=1)
 
-    batch_size, num_neg = pos_row.shape[0], neg_row.shape[0]
+    batch_size, num_sampled = opts.batch_size, opts.num_neg_samples
 
     # obtain prediction to then calculate loss
     Gpos = tf.gather(G_data, pos_row, axis=0)
@@ -470,13 +470,13 @@ class PoissonRegression(object):
 
     # sparse matrix multiplication for negative samples
     Gneg = tf.gather(G_data, neg_row, axis=0)
-    Gneg = tf.concat([tf.ones([num_neg, 1]), Gneg], axis=1)
+    Gneg = tf.concat([tf.ones([num_sampled, 1]), Gneg], axis=1)
     neg_prime = tf.reduce_sum(
       tf.multiply(
           Gneg, tf.transpose(
               tf.gather(self.V, neg_col, axis=1))),
       axis=1)
-    neg_phi = tf.reshape(tf.gather(theta, neg_row), shape=[num_neg]) + neg_prime
+    neg_phi = tf.reshape(tf.gather(theta, neg_row), shape=[num_sampled]) + neg_prime
     neg_poisson = Poisson(log_rate=neg_phi, name='neg_counts')
 
     # accident samples
@@ -488,28 +488,36 @@ class PoissonRegression(object):
           Gacc, tf.transpose(
               tf.gather(self.V, acc_col, axis=1))),
       axis=1)
-    #acc_phi = tf.gather(theta, acc_row) + acc_prime
     acc_phi = tf.reshape(tf.gather(theta, acc_row), shape=[num_acc]) + acc_prime
+
     acc_poisson = Poisson(log_rate=acc_phi, name='acc_counts')
 
     pos_data = tf.cast(pos_data, dtype=tf.float32)
     neg_data = tf.cast(neg_data, dtype=tf.float32)
     acc_data = tf.cast(acc_data, dtype=tf.float32)
 
+    num_pos = batch_size + tf.reduce_sum(num_exp_pos)
+    num_neg = tf.reduce_sum(num_exp_neg)
+
+    pos_prob = tf.maximum(0.0, pos_poisson.log_prob(y_pred))
+    neg_prob = tf.maximum(0.0, neg_poisson.log_prob(neg_data))
+    acc_prob = tf.maximum(0.0, acc_poisson.log_prob(acc_data))
+
     log_loss = -(
       tf.reduce_sum(gamma.log_prob(qgamma)) + \
       tf.reduce_sum(beta.log_prob(qbeta)) + \
-      tf.reduce_sum(pos_poisson.log_prob(y_pred)) * (total_nonzero / num_exp_pos) + \
-      (tf.reduce_sum(neg_poisson.log_prob(neg_data)) + \
-       tf.reduce_sum(acc_poisson.log_prob(acc_data))) * (total_zero / num_exp_neg)
+      tf.reduce_sum(pos_prob) * (total_nonzero / num_pos) + \
+      (tf.reduce_sum(neg_prob) + \
+       tf.reduce_sum(acc_prob)) * (total_zero / num_neg)
     )
+
     return log_loss
 
   def optimize(self, log_loss):
-    opts = self.options
+    opts = self.opts
 
     learning_rate = opts.learning_rate
-    clipping_size=opts.clipping_size
+    clipping_size = opts.clipping_size
 
     optimizer = tf.train.AdamOptimizer(learning_rate)
     gradients, variables = zip(*optimizer.compute_gradients(log_loss))
