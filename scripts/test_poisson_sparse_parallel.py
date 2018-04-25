@@ -112,7 +112,7 @@ class PoissonRegressionTest(tf.test.TestCase):
             log_loss = model.loss(G_data, y_data, batch)
             tf.global_variables_initializer().run()
             loss_, beta, gamma = sess.run(
-                    [model.loss, model.qbeta, model.qgamma]
+                    [log_loss, model.qbeta, model.qgamma]
             )
             self.assertIsNotNone(loss_)
             self.assertIsNotNone(beta)

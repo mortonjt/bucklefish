@@ -368,7 +368,7 @@ class PoissonRegression(object):
 
     # sample bias (for overdispersion)
     theta = tf.Variable(tf.random_normal([N, 1]), name='theta')
-    V = tf.concat([qgamma, qbeta], axis=0, name='V')
+    self.V = tf.concat([qgamma, qbeta], axis=0, name='V')
 
     # add bias terms for samples
     Gpos = tf.concat(
@@ -376,7 +376,7 @@ class PoissonRegression(object):
       axis=1, name='Gpos')
 
     Vprime = tf.transpose(
-      tf.gather(V, pos_col, axis=1), name='Vprime')
+      tf.gather(self.V, pos_col, axis=1), name='Vprime')
     # sparse matrix multiplication for positive samples
     pos_prime = tf.reduce_sum(
       tf.multiply(
@@ -423,9 +423,13 @@ class PoissonRegression(object):
           Number of expected negative hits. This is useful for
           scaling the minibatches appropriately.
     """
+    opts = self.opts
+
     (positive_batch, negative_batch, accident_batch,
      num_exp_pos, num_exp_neg) = batch
-    N, D = self.N, self.D
+    gamma_mean, gamma_scale = opts.gamma_mean, opts.gamma_scale
+    beta_mean, beta_scale = opts.beta_mean, opts.beta_scale
+    N, D, p = self.N, self.D, self.p
     num_nonzero = self.num_nonzero
     # unpack sparse tensors
     pos_data = positive_batch.values  # nonzero examples
@@ -442,16 +446,17 @@ class PoissonRegression(object):
 
     # obtain prediction to then calculate loss
     Gpos = tf.gather(G_data, pos_row, axis=0)
-    ypred = self.inference(Gpos, pos_col)
+    y_pred = self.inference(Gpos, pos_col)
     qbeta, qgamma, theta = self.qbeta, self.qgamma, self.theta
 
     # Actual calculation of loss is below.
     # add sample bias
-    ypred += tf.reshape(tf.gather(theta, pos_row), shape=[batch_size])
+    y_pred += tf.reshape(tf.gather(theta, pos_row), shape=[batch_size])
 
     total_zero = tf.constant(N*D - num_nonzero,
                              dtype=tf.float32)
     total_nonzero = tf.constant(num_nonzero, dtype=tf.float32)
+
     pos_poisson = Poisson(log_rate=y_pred, name='Y')
 
     # Distributions species bias
@@ -464,29 +469,37 @@ class PoissonRegression(object):
                   name='B')
 
     # sparse matrix multiplication for negative samples
-    Gneg = tf.gather(G_data, neg_row, axis=1)
+    Gneg = tf.gather(G_data, neg_row, axis=0)
     Gneg = tf.concat([tf.ones([num_neg, 1]), Gneg], axis=1)
     neg_prime = tf.reduce_sum(
       tf.multiply(
           Gneg, tf.transpose(
-              tf.gather(V, neg_col, axis=1))),
+              tf.gather(self.V, neg_col, axis=1))),
       axis=1)
     neg_phi = tf.reshape(tf.gather(theta, neg_row), shape=[num_neg]) + neg_prime
     neg_poisson = Poisson(log_rate=neg_phi, name='neg_counts')
 
     # accident samples
+    num_acc = tf.shape(accident_batch.indices)[0]
+    Gacc = tf.gather(G_data, acc_row, axis=0)
+    Gacc = tf.concat([tf.ones([num_acc, 1]), Gacc], axis=1)
     acc_prime = tf.reduce_sum(
       tf.multiply(
           Gacc, tf.transpose(
-              tf.gather(V, acc_col, axis=1))),
+              tf.gather(self.V, acc_col, axis=1))),
       axis=1)
+    #acc_phi = tf.gather(theta, acc_row) + acc_prime
     acc_phi = tf.reshape(tf.gather(theta, acc_row), shape=[num_acc]) + acc_prime
     acc_poisson = Poisson(log_rate=acc_phi, name='acc_counts')
+
+    pos_data = tf.cast(pos_data, dtype=tf.float32)
+    neg_data = tf.cast(neg_data, dtype=tf.float32)
+    acc_data = tf.cast(acc_data, dtype=tf.float32)
 
     log_loss = -(
       tf.reduce_sum(gamma.log_prob(qgamma)) + \
       tf.reduce_sum(beta.log_prob(qbeta)) + \
-      tf.reduce_sum(pos_poisson.log_prob(Y_ph)) * (total_nonzero / num_exp_pos) + \
+      tf.reduce_sum(pos_poisson.log_prob(y_pred)) * (total_nonzero / num_exp_pos) + \
       (tf.reduce_sum(neg_poisson.log_prob(neg_data)) + \
        tf.reduce_sum(acc_poisson.log_prob(acc_data))) * (total_zero / num_exp_neg)
     )
