@@ -514,6 +514,7 @@ class PoissonRegression(object):
     return log_loss
 
   def optimize(self, log_loss):
+    """ Perform optimization (via Gradient Descent)"""
     opts = self.opts
 
     learning_rate = opts.learning_rate
@@ -684,6 +685,7 @@ def main(_):
 if __name__ == "__main__":
   tf.app.run()
 
+# TODO: Future refactor
 # Two parts to tensorflow (look at convolutional.py)
 # __init__ = instance of class
 #            (set the configuration parameters)

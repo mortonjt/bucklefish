@@ -166,6 +166,7 @@ class PoissonRegressionTest(tf.test.TestCase):
                 )
                 self.assertIsNotNone(beta)
                 self.assertIsNotNone(gamma)
+                # make sure that there is an actual improvement wrt loss
                 self.assertLess(loss_2, loss_1)
 
     def test_evaluate(self):
@@ -179,34 +180,50 @@ class PoissonRegressionTest(tf.test.TestCase):
         md_holdout = np.array([[1.5, 2.5]]).T
         table_holdout = np.array([
             [1, 2, 1, 0, 0, 0],
-            [0, 1, 2, 1, 0, 0],
-        ])
+            [0, 1, 2, 1, 0, 0]
+        ], dtype=np.float32)
         N, D = table.shape
+        M, D = table_holdout.shape
         p = md.shape[1]
         table = coo_matrix(table)
-        table_holdout = coo_matrix(table_holdout)
+
         opts = Options(batch_size=5, num_neg_samples=3,
                        learning_rate=1e-1,
+                       clipping_size=10,
                        beta_mean=0, beta_scale=1,
                        gamma_mean=0, gamma_scale=1)
-        with tf.Graph().as_default(), tf.Session() as sess:
-            y_data = tf.SparseTensorValue(
-                indices=np.array([table.row,  table.col]).T,
-                values=table.data,
-                dense_shape=(N, D)
-            )
-            G_data = tf.constant(md, dtype=tf.float32)
-            G_holdout = tf.constant(md_holdout, dtype=tf.float32)
+        for _ in range(10):
+            with tf.Graph().as_default(), tf.Session() as sess:
+                y_data = tf.SparseTensorValue(
+                    indices=np.array([table.row,  table.col]).T,
+                    values=table.data,
+                    dense_shape=(N, D)
+                )
 
-            model = PoissonRegression(opts, sess)
-            model.N = N
-            model.D = D
-            model.p = p
-            model.num_nonzero = table.nnz
+                y_holdout = tf.constant(table_holdout, dtype=tf.float32)
 
+                G_data = tf.constant(md, dtype=tf.float32)
+                G_holdout = tf.constant(md_holdout, dtype=tf.float32)
 
-    def test_train(self):
-        pass
+                model = PoissonRegression(opts, sess)
+                model.N = N
+                model.D = D
+                model.p = p
+                model.num_nonzero = table.nnz
+
+                batch = model.sample(y_data)
+                log_loss = model.loss(G_data, y_data, batch)
+                train = model.optimize(log_loss)
+                mad = model.evaluate(G_holdout, y_holdout)
+                tf.global_variables_initializer().run()
+                train_, mad_, loss_, beta, gamma = sess.run(
+                    [train, mad, log_loss, model.qbeta, model.qgamma]
+                )
+
+                self.assertIsNotNone(beta)
+                self.assertIsNotNone(gamma)
+                # Look at mean absolute error
+                self.assertFalse(np.isnan(mad_))
 
 
 if __name__ == "__main__":
