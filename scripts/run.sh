@@ -15,21 +15,39 @@
 #    --checkpoint_interval 60 \
 #    --epochs_to_train 100
  
-echo 'poisson'
-python poisson_sparse.py \
+# echo 'poisson'
+# python poisson_sparse.py \
+#   --train_biom ../data/88soils/train_88soils_processed.biom \
+#   --train_metadata ../data/88soils/train_88soils_metadata.txt \
+#   --test_biom ../data/88soils/test_88soils_processed.biom \
+#   --test_metadata ../data/88soils/test_88soils_metadata.txt \
+#   --formula ph \
+#   --learning_rate 1e-1 \
+#   --num_neg_samples 1024 \
+#   --batch_size 1024 \
+#   --beta_scale 3 \
+#   --gamma_scale 3 \
+#   --min_sample_count 100 \
+#   --min_feature_count 10 \
+#   --save_path ../logs/poisson_sparse_log \
+#   --checkpoint_interval 60 \
+#   --epochs_to_train 100
+
+echo 'poisson_parallel'
+python poisson_sparse_parallel.py \
   --train_biom ../data/88soils/train_88soils_processed.biom \
   --train_metadata ../data/88soils/train_88soils_metadata.txt \
   --test_biom ../data/88soils/test_88soils_processed.biom \
   --test_metadata ../data/88soils/test_88soils_metadata.txt \
-  --formula ph * soil_type \
+  --formula ph \
   --learning_rate 1e-1 \
-  --num_neg_samples 1024 \
+  --num_neg_samples 1025 \
   --batch_size 1024 \
   --beta_scale 3 \
   --gamma_scale 3 \
   --min_sample_count 100 \
   --min_feature_count 10 \
-  --save_path ../logs/poisson_sparse_log \
+  --save_path ../logs/poisson_sparse_parallel_log \
   --checkpoint_interval 60 \
   --epochs_to_train 100
 

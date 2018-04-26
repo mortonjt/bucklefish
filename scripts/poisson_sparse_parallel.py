@@ -15,6 +15,7 @@ from skbio.stats.composition import closure, clr_inv
 from scipy.stats import spearmanr
 from scipy.sparse import coo_matrix
 from util import cross_validation
+from tqdm import tqdm
 import time
 
 
@@ -152,7 +153,6 @@ class PoissonRegression(object):
 
     self.saver = tf.train.Saver()
     self.writer = tf.summary.FileWriter(opts.save_path, self.sess.graph)
-    self.run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
 
     tf.summary.scalar('loss', self.log_loss)
     tf.summary.histogram('qbeta', self.qbeta)
@@ -161,7 +161,7 @@ class PoissonRegression(object):
     tf.summary.scalar('mean_absolute_error', self.mean_err)
     self.merged = tf.summary.merge_all()
     self.log_handle = open(os.path.join(opts.save_path, 'run.log'), 'w')
-    self.step = tf.constant(0)
+    self.step = 0
 
   def preprocess(self, formula,
                  train_table, train_metadata,
@@ -585,23 +585,23 @@ class PoissonRegression(object):
     opts = self.opts
     batch_size = opts.batch_size
     checkpoint_interval = opts.checkpoint_interval
-
     run_metadata = tf.RunMetadata()
+    run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
 
-    if self.step % 1000 == 0:
+    if self.step % 100 == 0:
       # store runtime information
-      _, summary, train_loss = self.sess.run(
+      _, summary, train_loss,  = self.sess.run(
           [self.optimizer, self.merged, self.log_loss],
           options=run_options,
           run_metadata=run_metadata
       )
-      self.writer.add_summary(summary, i)
-    elif self.step % 5000 == 0:
+      self.writer.add_summary(summary, self.step)
+    elif self.step % 500 == 0:
       # store loss information and cross-validation information
       _, summary, err, train_loss = self.sess.run(
         [self.optimizer, self.mean_err, self.merged, self.log_loss]
       )
-      self.writer.add_summary(summary, i)
+      self.writer.add_summary(summary, self.step)
     else:
       _ = self.sess.run(
           [self.optimizer]
@@ -651,18 +651,18 @@ def main(_):
 
     start_time = time.time()
     model.last_checkpoint_time = 0
-    for i in range(num_iter):
+    for i in tqdm(range(num_iter)):
       model.train()
 
     elapsed_time = time.time() - start_time
     print('Elapsed Time: %f seconds' % elapsed_time)
 
     # Cross validation
-    pred_beta = model.qbeta.eval()
-    pred_gamma = model.qgamma.eval()
-    mse, mrc = cross_validation(
-      opts.test_metadata.values, pred_beta, pred_gamma, y_test)
-    print("MSE: %f, MRC: %f" % (mse, mrc))
+    # pred_beta = model.qbeta.eval()
+    # pred_gamma = model.qgamma.eval()
+    # mse, mrc = cross_validation(
+    #   options.test_metadata.values, pred_beta, pred_gamma, y_test)
+    # print("MSE: %f, MRC: %f" % (mse, mrc))
 
 
 if __name__ == "__main__":
