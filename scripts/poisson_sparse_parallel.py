@@ -415,7 +415,7 @@ class PoissonRegression(object):
 
 
   def loss(self, G_data, y_data, batch):
-    """ Computes the loss
+    """ Computes the loss.
 
     Parameters
     ----------
@@ -447,7 +447,6 @@ class PoissonRegression(object):
     """
     with tf.name_scope('loss'):
       opts = self.opts
-
       (positive_batch, negative_batch, accident_batch,
        num_exp_pos, num_exp_neg) = batch
       gamma_mean, gamma_scale = opts.gamma_mean, opts.gamma_scale
@@ -464,7 +463,6 @@ class PoissonRegression(object):
       acc_data = accident_batch.values  # accident examples
       acc_row = tf.gather(accident_batch.indices, 0, axis=1)
       acc_col = tf.gather(accident_batch.indices, 1, axis=1)
-
       batch_size, num_sampled = opts.batch_size, opts.num_neg_samples
 
       # obtain prediction to then calculate loss
@@ -475,11 +473,9 @@ class PoissonRegression(object):
       # Actual calculation of loss is below.
       # add sample bias
       y_pred += tf.reshape(tf.gather(theta, pos_row), shape=[batch_size])
-
       total_zero = tf.constant(N*D - num_nonzero,
                                dtype=tf.float32)
       total_nonzero = tf.constant(num_nonzero, dtype=tf.float32)
-
       pos_poisson = Poisson(log_rate=y_pred, name='Y')
 
       # Distributions species bias
@@ -533,7 +529,6 @@ class PoissonRegression(object):
         (tf.reduce_sum(neg_prob) + \
          tf.reduce_sum(acc_prob)) * (total_zero / num_neg)
       )
-
       return log_loss
 
   def optimize(self, log_loss):
