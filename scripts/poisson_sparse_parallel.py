@@ -44,6 +44,7 @@ flags.DEFINE_float("gamma_mean", 0,
                    'Mean of prior distribution for sample bias')
 flags.DEFINE_float("gamma_scale", 1.0,
                    'Scale of prior distribution for sample bias')
+# TODO: Add in block size parameter
 flags.DEFINE_integer(
     "epochs_to_train", 15,
     "Number of epochs to train. Each epoch processes the training data once "
@@ -81,6 +82,12 @@ class Options(object):
       setattr(self, k, v)
 
     try:
+
+      if not os.path.exists(self.save_path):
+        os.makedirs(self.save_path)
+
+      self.formula = self.formula + '+0'
+
       if isinstance(self.train_biom, str):
         self.train_table = load_table(self.train_biom)
       elif isinstance(self.train_biom, Table):
@@ -98,11 +105,6 @@ class Options(object):
         self.test_metadata = pd.read_table(self.test_metadata, index_col=0)
       elif isinstance(self.train_metadata, pd.DataFrame):
         self.test_metadata = self.test_metadata
-
-      self.formula = self.formula + '+0'
-
-      if not os.path.exists(self.save_path):
-        os.makedirs(self.save_path)
 
     except Exception as err:
       print(err)
@@ -308,7 +310,6 @@ class PoissonRegression(object):
                           name='positive_cols')
       true_data = tf.gather(y_data.values, true_batch_ids,
                             name='positive_data')
-
       true_labels = tf.cast(tf.reshape(true_ids, [opts.batch_size, 1]),
                             dtype=tf.int64)
 
@@ -539,13 +540,15 @@ class PoissonRegression(object):
       # neg_prob = tf.Print(neg_prob, [neg_prob])
       # acc_prob = tf.Print(acc_prob, [acc_prob])
 
+      total_pos = tf.reduce_sum(pos_prob)
       total_acc = tf.reduce_sum(acc_prob)
+      total_neg = tf.reduce_sum(neg_prob)
 
       log_loss = -(
         tf.reduce_sum(gamma.log_prob(qgamma)) + \
         tf.reduce_sum(beta.log_prob(qbeta)) + \
-        (tf.reduce_sum(pos_prob) + total_acc) * (total_nonzero / num_pos) + \
-        (tf.reduce_sum(neg_prob) - total_acc) * (total_zero / num_neg)
+        (total_pos + total_acc) * (total_nonzero / num_pos) + \
+        (total_neg - total_acc) * (total_zero / num_neg)
       )
       return log_loss
 

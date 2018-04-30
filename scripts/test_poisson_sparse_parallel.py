@@ -8,6 +8,7 @@ from biom import Table
 import pandas as pd
 from scipy.stats import pearsonr
 from skbio.stats.composition import clr_inv
+import matplotlib.pyplot as plt
 
 
 def random_poisson_model(num_samples, num_features,
@@ -129,8 +130,9 @@ def random_poisson_model(num_samples, num_features,
 class PoissonRegressionTest(tf.test.TestCase):
 
     def setUp(self):
+        # specifies if plots should be displayed for diagnostics
+        self.display_plots = False
 
-        pass
 
     def test_sample(self):
         # Need to define the metadata and bioms
@@ -358,8 +360,9 @@ class PoissonRegressionTest(tf.test.TestCase):
 
 
     def test_with_simulation(self):
+
         num_samples = 100
-        num_features = 20
+        num_features = 1000
         ex = random_poisson_model(num_samples, num_features,
                                   reps=1,
                                   low=-1, high=1,
@@ -370,9 +373,9 @@ class PoissonRegressionTest(tf.test.TestCase):
                                   gamma_mean=0,
                                   gamma_scale=1,
                                   kappa_mean=0,
-                                  kappa_scale=0.0,
+                                  kappa_scale=0,
                                   beta_mean=0,
-                                  beta_scale=4
+                                  beta_scale=2
         )
 
         (table, md, basis, sim_alpha, sim_beta, sim_theta,
@@ -383,10 +386,11 @@ class PoissonRegressionTest(tf.test.TestCase):
         table = table.matrix_data.tocoo().T
 
         # Building the model
-        opts = Options(batch_size=5, num_neg_samples=3,
+        opts = Options(batch_size=500, num_neg_samples=500,
                        learning_rate=1e-1,
                        clipping_size=10,
-                       beta_mean=0, beta_scale=1,
+                       beta_mean=0, beta_scale=2,
+                       save_path='tf_debug',
                        gamma_mean=0, gamma_scale=1)
         with tf.Graph().as_default(), tf.Session() as sess:
             y_data = tf.SparseTensorValue(
@@ -410,17 +414,50 @@ class PoissonRegressionTest(tf.test.TestCase):
                     [train, g, log_loss,
                      model.qbeta, model.qgamma, model.theta]
             )
-            for _ in range(1000):
+            for _ in range(100):
                 train_, loss_2, beta, gamma, theta = sess.run(
                         [train, log_loss,
                          model.qbeta, model.qgamma, model.theta]
                 )
 
-            beta_corr = pearsonr(beta.ravel(),
-                                 sim_beta.values.ravel() @ basis)[0]
-            gamma_corr = pearsonr(gamma.ravel(),
-                                  sim_gamma.values.ravel() @ basis)[0]
-            theta_corr = pearsonr(theta.ravel(), sim_theta.values.ravel())[0]
+            beta_corr, bval = pearsonr(beta.ravel(),
+                                       sim_beta.values.ravel() @ basis)
+            gamma_corr, gval = pearsonr(gamma.ravel(),
+                                        sim_gamma.values.ravel() @ basis)
+            theta_corr, tval = pearsonr(theta.ravel(),
+                                        sim_theta.values.ravel())
+
+            if self.display_plots:
+                x, y = beta.ravel(), sim_beta.values.ravel() @ basis
+                fig, ax = plt.subplots()
+                mx = np.linspace(min([x.min(), y.min()]),
+                                 max([x.max(), y.max()]))
+                ax.plot(mx, mx, '-k')
+                ax.scatter(x, y)
+                ax.set_xlabel('Predicted')
+                ax.set_ylabel('Actual')
+                fig.savefig('beta.pdf')
+
+                x, y = gamma.ravel(), sim_gamma.values.ravel() @ basis
+                fig, ax = plt.subplots()
+                mx = np.linspace(min([x.min(), y.min()]),
+                                 max([x.max(), y.max()]))
+                ax.plot(mx, mx, '-k')
+                ax.scatter(x, y)
+                ax.set_xlabel('Predicted')
+                ax.set_ylabel('Actual')
+                fig.savefig('gamma.pdf')
+
+                x, y = theta.ravel(), sim_theta.values.ravel()
+                fig, ax = plt.subplots()
+                mx = np.linspace(min([x.min(), y.min()]),
+                                 max([x.max(), y.max()]))
+                ax.plot(mx, mx, '-k')
+                ax.scatter(x, y)
+                ax.set_xlabel('Predicted')
+                ax.set_ylabel('Actual')
+                fig.savefig('theta.pdf')
+
             self.assertGreater(beta_corr, 0.7)
             self.assertGreater(gamma_corr, 0.7)
             self.assertGreater(theta_corr, 0.7)
