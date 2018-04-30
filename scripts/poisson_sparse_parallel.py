@@ -227,15 +227,21 @@ class PoissonRegression(object):
       dense_shape=coo_matrix.shape)
     G_data = tf.constant(train_metadata.values, dtype=tf.float32)
 
+    biom_data = test_table.matrix_data.tocoo().T
     G_test = tf.constant(test_metadata.values, dtype=tf.float32)
-    y_test = tf.constant(np.array(test_table.matrix_data.todense()).T,
-                         dtype=tf.float32)
+    y_test = tf.SparseTensorValue(
+      indices=np.array([biom_data.row,  biom_data.col]).T,
+      values=biom_data.data,
+      dense_shape=biom_data.shape)
 
     # D = number of features.  N = number of samples
     # num_nonzero = number of nonzero entries in the table.
     self.D, self.N = train_table.shape
     self.p = train_metadata.shape[1]
     self.num_nonzero = train_table.nnz
+
+    self.y_test = biom_data
+    self.G_test = test_metadata.values
 
     return y_data, y_test, G_data, G_test
 
@@ -380,7 +386,6 @@ class PoissonRegression(object):
 
       pos_col = obs_id
 
-      batch_size = opts.batch_size
       gamma_mean, gamma_scale = opts.gamma_mean, opts.gamma_scale
       beta_mean, beta_scale = opts.beta_mean, opts.beta_scale
 
@@ -394,7 +399,7 @@ class PoissonRegression(object):
 
       # add bias terms for samples
       Gpos = tf.concat(
-        [tf.ones([batch_size, 1]), G_data],
+        [tf.ones([G_data.shape[0], 1]), G_data],
         axis=1, name='Gpos')
 
       Vprime = tf.transpose(
@@ -564,15 +569,33 @@ class PoissonRegression(object):
        for each cell value in the matrix.
     """
     with tf.name_scope('evaluate'):
-      qbeta = self.qbeta
-      qgamma = self.qgamma
 
       # evaluate the accuracy
-      holdout_count = tf.reduce_sum(Y_holdout, axis=1)
-      pred =  tf.reshape(holdout_count, [-1, 1]) * tf.nn.softmax(
-        tf.matmul(G_holdout, qbeta) + qgamma)
+      holdout_count = tf.cast(
+        tf.sparse_reduce_sum(Y_holdout, axis=1), dtype=tf.float32)
+      obs_ids = tf.gather(Y_holdout.indices, 1, axis=1)
+      samp_ids = tf.gather(Y_holdout.indices, 0, axis=1)
 
-      mse = tf.reduce_mean(tf.squeeze(tf.abs(pred - Y_holdout)))
+      #samp_ids = tf.Print(samp_ids, [samp_ids])
+
+      g_data = tf.gather(G_holdout, samp_ids, axis=0)
+      smax = tf.SparseTensorValue(
+        indices=Y_holdout.indices,
+        values=self.inference(g_data, obs_ids),
+        dense_shape=Y_holdout.dense_shape)
+
+      smax = tf.sparse_softmax(smax)
+
+      holdout_count = tf.gather(holdout_count, samp_ids, axis=0)
+      #holdout_count = tf.Print(holdout_count, [holdout_count])
+      pred_values = tf.cast(tf.multiply(holdout_count, smax.values), tf.float32)
+      #pred_values = tf.cast(smax.values, tf.float32)
+      #pred_values = tf.Print(pred_values, [pred_values])
+
+      Y_values = tf.cast(Y_holdout.values, tf.float32)
+      #Y_values = tf.Print(Y_values, [Y_values])
+      mse = tf.reduce_mean(
+        tf.squeeze(tf.abs(pred_values - Y_values)))
       return mse
 
   def train(self):
@@ -652,11 +675,13 @@ def main(_):
     elapsed_time = time.time() - start_time
     print('Elapsed Time: %f seconds' % elapsed_time)
 
-    # Cross validation
+    # y_test = np.array(model.y_test.todense())
+    # G_test = model.G_test
+    # # Cross validation
     # pred_beta = model.qbeta.eval()
     # pred_gamma = model.qgamma.eval()
     # mse, mrc = cross_validation(
-    #   options.test_metadata.values, pred_beta, pred_gamma, y_test)
+    #   G_test, pred_beta, pred_gamma, y_test)
     # print("MSE: %f, MRC: %f" % (mse, mrc))
 
 
