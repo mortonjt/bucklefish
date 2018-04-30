@@ -2,6 +2,128 @@ import numpy as np
 import tensorflow as tf
 from poisson_sparse_parallel import Options, PoissonRegression
 from scipy.sparse import coo_matrix
+from skbio.stats.composition import _gram_schmidt_basis, closure
+from sklearn.utils import check_random_state
+from biom import Table
+import pandas as pd
+from scipy.stats import pearsonr
+from skbio.stats.composition import clr_inv
+
+
+def random_poisson_model(num_samples, num_features,
+                         reps=1,
+                         tree=None,
+                         low=2, high=10,
+                         alpha_mean=0,
+                         alpha_scale=5,
+                         theta_mean=0,
+                         theta_scale=5,
+                         gamma_mean=0,
+                         gamma_scale=5,
+                         kappa_mean=0,
+                         kappa_scale=5,
+                         beta_mean=0,
+                         beta_scale=5,
+                         seed=0):
+    """ Generates a table using a random poisson regression model.
+
+    Here we will be simulating microbial counts given the model, and the
+    corresponding model priors.
+
+    Parameters
+    ----------
+    num_samples : int
+        Number of samples
+    num_features : int
+        Number of features
+    tree : np.array
+        Tree specifying orthonormal contrast matrix.
+    low : float
+        Smallest gradient value.
+    high : float
+        Largest gradient value.
+    alpha_mean : float
+        Mean of alpha prior  (for global bias)
+    alpha_scale: float
+        Scale of alpha prior  (for global bias)
+    theta_mean : float
+        Mean of theta prior (for sample bias)
+    theta_scale : float
+        Scale of theta prior (for sample bias)
+    gamma_mean : float
+        Mean of gamma prior (for feature bias)
+    gamma_scale : float
+        Scale of gamma prior (for feature bias)
+    kappa_mean : float
+        Mean of kappa prior (for overdispersion)
+    kappa_scale : float
+        Scale of kappa prior (for overdispersion)
+    beta_mean : float
+        Mean of beta prior (for regression coefficients)
+    beta_scale : float
+        Scale of beta prior (for regression coefficients)
+
+    Returns
+    -------
+    table : biom.Table
+        Biom representation of the count table.
+    metadata : pd.DataFrame
+        DataFrame containing relevant metadata.
+    beta : np.array
+        Regression parameter estimates.
+    theta : np.array
+        Bias per sample.
+    gamma : np.array
+        Bias per feature
+    kappa : np.array
+        Dispersion rates of counts per sample.
+    """
+    # generate all of the coefficient using the random poisson model
+    state = check_random_state(seed)
+    alpha = state.normal(alpha_mean, alpha_scale)
+    theta = state.normal(theta_mean, theta_scale, size=(num_samples, 1)) + alpha
+    beta = state.normal(beta_mean, beta_scale, size=num_features-1)
+    gamma = state.normal(gamma_mean, gamma_scale, size=num_features-1)
+    kappa = state.lognormal(kappa_mean, kappa_scale, size=num_features-1)
+
+    if tree is None:
+        basis = coo_matrix(_gram_schmidt_basis(num_features), dtype=np.float32)
+    else:
+        basis = sparse_balance_basis(tree)[0]
+
+    G = np.hstack([np.linspace(low, high, num_samples // reps)]
+                  for _ in range(reps))
+    G = np.sort(G)
+    N, D = num_samples, num_features
+    G_data = np.vstack((np.ones(N), G)).T
+    B = np.vstack((gamma, beta))
+
+    mu = G_data @ B @ basis
+    # we use kappa here to handle overdispersion.
+    #eps = lambda x: state.normal([0] * len(x), x)
+    eps_ = np.vstack([state.normal([0] * len(kappa), kappa)
+                      for _ in range(mu.shape[0])])
+    eps = eps_ @ basis
+    table = np.vstack(
+        state.poisson(
+            np.exp(
+                mu[i, :] + theta[i] + eps[i, :]
+            )
+        )
+        for i in range(mu.shape[0])
+    ).T
+
+    samp_ids = ['S%d' % i for i in range(num_samples)]
+    feat_ids = ['F%d' % i for i in range(num_features)]
+    balance_ids = ['L%d' % i for i in range(num_features-1)]
+
+    table = Table(table, feat_ids, samp_ids)
+    metadata = pd.DataFrame({'G': G.ravel()}, index=samp_ids)
+    beta = pd.DataFrame({'beta': beta.ravel()}, index=balance_ids)
+    gamma = pd.DataFrame({'gamma': gamma.ravel()}, index=balance_ids)
+    kappa = pd.DataFrame({'kappa': kappa.ravel()}, index=balance_ids)
+    theta = pd.DataFrame({'theta': theta.ravel()}, index=samp_ids)
+    return table, metadata, basis, alpha, beta, theta, gamma, kappa, eps_
 
 
 class PoissonRegressionTest(tf.test.TestCase):
@@ -159,14 +281,16 @@ class PoissonRegressionTest(tf.test.TestCase):
 
                 batch = model.sample(y_data)
                 log_loss = model.loss(G_data, y_data, batch)
-                train = model.optimize(log_loss)
+                train, g, v = model.optimize(log_loss)
                 tf.global_variables_initializer().run()
-                train_, loss_1, beta, gamma = sess.run(
-                        [train, log_loss, model.qbeta, model.qgamma]
+                train_, grads, loss_1, beta, gamma = sess.run(
+                        [train, g, log_loss, model.qbeta, model.qgamma]
                 )
+                print(beta)
                 train_, loss_2, beta, gamma = sess.run(
                         [train, log_loss, model.qbeta, model.qgamma]
                 )
+                print(beta)
                 self.assertIsNotNone(beta)
                 self.assertIsNotNone(gamma)
                 # make sure that there is an actual improvement wrt loss
@@ -189,6 +313,7 @@ class PoissonRegressionTest(tf.test.TestCase):
         M, D = table_holdout.shape
         p = md.shape[1]
         table = coo_matrix(table)
+        table_holdout = coo_matrix(table_holdout)
 
         opts = Options(batch_size=5, num_neg_samples=3,
                        learning_rate=1e-1,
@@ -202,8 +327,11 @@ class PoissonRegressionTest(tf.test.TestCase):
                     values=table.data,
                     dense_shape=(N, D)
                 )
-
-                y_holdout = tf.constant(table_holdout, dtype=tf.float32)
+                y_holdout = tf.SparseTensorValue(
+                    indices=np.array([table_holdout.row, table_holdout.col]).T,
+                    values=table_holdout.data,
+                    dense_shape=table_holdout.shape
+                )
 
                 G_data = tf.constant(md, dtype=tf.float32)
                 G_holdout = tf.constant(md_holdout, dtype=tf.float32)
@@ -227,6 +355,75 @@ class PoissonRegressionTest(tf.test.TestCase):
                 self.assertIsNotNone(gamma)
                 # Look at mean absolute error
                 self.assertFalse(np.isnan(mad_))
+
+
+    def test_with_simulation(self):
+        num_samples = 100
+        num_features = 20
+        ex = random_poisson_model(num_samples, num_features,
+                                  reps=1,
+                                  low=-1, high=1,
+                                  alpha_mean=-4,
+                                  alpha_scale=1,
+                                  theta_mean=0,
+                                  theta_scale=1,
+                                  gamma_mean=0,
+                                  gamma_scale=1,
+                                  kappa_mean=0,
+                                  kappa_scale=0.0,
+                                  beta_mean=0,
+                                  beta_scale=4
+        )
+
+        (table, md, basis, sim_alpha, sim_beta, sim_theta,
+         sim_gamma, sim_kappa, sim_eps) = ex
+
+        N, D = num_samples, num_features
+        p = md.shape[1]   # number of covariates
+        table = table.matrix_data.tocoo().T
+
+        # Building the model
+        opts = Options(batch_size=5, num_neg_samples=3,
+                       learning_rate=1e-1,
+                       clipping_size=10,
+                       beta_mean=0, beta_scale=1,
+                       gamma_mean=0, gamma_scale=1)
+        with tf.Graph().as_default(), tf.Session() as sess:
+            y_data = tf.SparseTensorValue(
+                indices=np.array([table.row,  table.col]).T,
+                values=table.data,
+                dense_shape=(N, D)
+            )
+            G_data = tf.constant(md.values, dtype=tf.float32)
+
+            model = PoissonRegression(opts, sess)
+            model.N = N
+            model.D = D
+            model.p = p
+            model.num_nonzero = table.nnz
+
+            batch = model.sample(y_data)
+            log_loss = model.loss(G_data, y_data, batch)
+            train, g, v = model.optimize(log_loss)
+            tf.global_variables_initializer().run()
+            train_, grads, loss_1, beta, gamma, theta = sess.run(
+                    [train, g, log_loss,
+                     model.qbeta, model.qgamma, model.theta]
+            )
+            for _ in range(1000):
+                train_, loss_2, beta, gamma, theta = sess.run(
+                        [train, log_loss,
+                         model.qbeta, model.qgamma, model.theta]
+                )
+
+            beta_corr = pearsonr(beta.ravel(),
+                                 sim_beta.values.ravel() @ basis)[0]
+            gamma_corr = pearsonr(gamma.ravel(),
+                                  sim_gamma.values.ravel() @ basis)[0]
+            theta_corr = pearsonr(theta.ravel(), sim_theta.values.ravel())[0]
+            self.assertGreater(beta_corr, 0.7)
+            self.assertGreater(gamma_corr, 0.7)
+            self.assertGreater(theta_corr, 0.7)
 
 
 if __name__ == "__main__":
