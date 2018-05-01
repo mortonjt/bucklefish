@@ -200,21 +200,19 @@ def main(_):
                              dtype=tf.float32)
     total_nonzero = tf.constant(y_data.nnz, dtype=tf.float32)
 
-    # Define PointMass Variables first
     qgamma = tf.Variable(tf.random_normal([1, D]), name='qgamma')
     # sample bias (for overdispersion)
     theta = tf.Variable(tf.random_normal([N, 1]), name='theta')
     qbeta = tf.Variable(tf.random_normal([p, D]), name='qB')
 
-    # Distributions
     # species bias
     gamma = Normal(loc=tf.zeros([1, D]) + gamma_mean,
-                 scale=tf.ones([1, D]) * gamma_scale,
-                 name='gamma')
+                   scale=tf.ones([1, D]) * gamma_scale,
+                   name='gamma')
     # regression coefficents distribution
     beta = Normal(loc=tf.zeros([p, D]) + beta_mean,
-                scale=tf.ones([p, D]) * beta_scale,
-                name='B')
+                  scale=tf.ones([p, D]) * beta_scale,
+                  name='B')
 
     V = tf.concat([qgamma, qbeta], axis=0)
 
@@ -228,7 +226,8 @@ def main(_):
           Gpos, tf.transpose(
               tf.gather(V, pos_col, axis=1))),
       axis=1)
-    pos_phi = tf.reshape(tf.gather(theta, pos_row), shape=[batch_size]) + pos_prime
+    pos_phi = tf.reshape(tf.gather(theta, pos_row),
+                         shape=[batch_size]) + pos_prime
 
     Y = Poisson(log_rate=pos_phi, name='Y')
 
@@ -332,7 +331,8 @@ def main(_):
     # Cross validation
     pred_beta = qbeta.eval()
     pred_gamma = qgamma.eval()
-    mse, mrc = cross_validation(test_metadata.values, pred_beta, pred_gamma, y_test)
+    mse, mrc = cross_validation(test_metadata.values,
+                                pred_beta, pred_gamma, y_test)
     print("MSE: %f, MRC: %f" % (mse, mrc))
 
 

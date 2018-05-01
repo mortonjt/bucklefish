@@ -45,6 +45,7 @@ python poisson_sparse_parallel.py \
   --batch_size 1024 \
   --beta_scale 3 \
   --gamma_scale 3 \
+  --clipping_size 100 \
   --min_sample_count 100 \
   --min_feature_count 10 \
   --save_path ../logs/poisson_sparse_parallel_log \

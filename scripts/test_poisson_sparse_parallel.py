@@ -363,19 +363,14 @@ class PoissonRegressionTest(tf.test.TestCase):
 
         num_samples = 100
         num_features = 1000
-        ex = random_poisson_model(num_samples, num_features,
-                                  reps=1,
-                                  low=-1, high=1,
-                                  alpha_mean=-4,
-                                  alpha_scale=1,
-                                  theta_mean=0,
-                                  theta_scale=1,
-                                  gamma_mean=0,
-                                  gamma_scale=1,
-                                  kappa_mean=0,
-                                  kappa_scale=0,
-                                  beta_mean=0,
-                                  beta_scale=2
+        ex = random_poisson_model(
+            num_samples, num_features,
+            reps=1, low=-1, high=1,
+            alpha_mean=-4, alpha_scale=1,
+            theta_mean=0, theta_scale=1,
+            gamma_mean=0, gamma_scale=1,
+            kappa_mean=0, kappa_scale=0,
+            beta_mean=0, beta_scale=2
         )
 
         (table, md, basis, sim_alpha, sim_beta, sim_theta,

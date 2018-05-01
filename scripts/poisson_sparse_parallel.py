@@ -135,34 +135,34 @@ class PoissonRegression(object):
     self.opts = options
     self.sess = session
 
-  def initialize(self):
+  def initialize(self, y_data, y_test, G_data, G_test):
     opts = self.opts
-    # preprocessing (i.e. biom table, metadata, ...)
-    (y_data, y_test, G_data, G_test) = self.preprocess(
-      opts.formula,
-      opts.train_table, opts.train_metadata,
-      opts.test_table, opts.test_metadata,
-      opts.min_sample_count, opts.min_feature_count
-    )
 
     batch = self.sample(
       y_data, num_pos=opts.batch_size, num_neg=opts.num_neg_samples
     )
 
-    self.log_loss = self.loss(G_data, y_data, batch)
-    self.optimizer, grads, variables = self.optimize(self.log_loss)
-    self.mean_err = self.evaluate(G_test, y_test)
+    log_loss = self.loss(G_data, y_data, batch)
+    train_step, grads, variables = self.optimize(log_loss)
+    mean_err = self.evaluate(G_test, y_test)
+
+    tf.global_variables_initializer().run()
+
+    (train_, g, loss_, err_, beta, gamma, theta) = self.sess.run(
+      [train_step, grads, log_loss, mean_err,
+       self.qbeta, self.qgamma, self.theta]
+    )
 
     self.saver = tf.train.Saver()
     self.writer = tf.summary.FileWriter(opts.save_path, self.sess.graph)
 
-    tf.summary.scalar('loss', self.log_loss)
+    # tf.summary.scalar('loss', self.log_loss)
     tf.summary.histogram('qbeta', self.qbeta)
     tf.summary.histogram('qgamma', self.qgamma)
     tf.summary.histogram('theta', self.theta)
-    tf.summary.scalar('mean_absolute_error', self.mean_err)
-    for i, g in enumerate(grads):
-      tf.summary.histogram('gradient/%s' % variables[i], g)
+    #tf.summary.scalar('mean_absolute_error', self.mean_err)
+    #for i, g in enumerate(grads):
+    #  tf.summary.histogram('gradient/%s' % variables[i], g)
 
     self.merged = tf.summary.merge_all()
     self.log_handle = open(os.path.join(opts.save_path, 'run.log'), 'w')
@@ -390,9 +390,6 @@ class PoissonRegression(object):
 
       pos_col = obs_id
 
-      gamma_mean, gamma_scale = opts.gamma_mean, opts.gamma_scale
-      beta_mean, beta_scale = opts.beta_mean, opts.beta_scale
-
       # Regression coefficients
       qgamma = tf.Variable(tf.random_normal([1, D]), name='qgamma')
       qbeta = tf.Variable(tf.random_normal([p, D]), name='qbeta')
@@ -522,8 +519,6 @@ class PoissonRegression(object):
                            shape=[num_acc]) + acc_prime
       acc_poisson = Poisson(log_rate=acc_phi, name='acc_counts')
 
-      #pos_data = tf.Print(pos_data, [pos_data])
-
       pos_data = tf.cast(pos_data, dtype=tf.float32)
       neg_data = tf.cast(neg_data, dtype=tf.float32)
       acc_data = tf.cast(acc_data, dtype=tf.float32)
@@ -536,17 +531,17 @@ class PoissonRegression(object):
       neg_prob = neg_poisson.log_prob(neg_data)
       acc_prob = acc_poisson.log_prob(acc_data)
 
-      # pos_prob = tf.Print(pos_prob, [pos_prob])
-      # neg_prob = tf.Print(neg_prob, [neg_prob])
-      # acc_prob = tf.Print(acc_prob, [acc_prob])
+      # print('pos_prob:', pos_prob.shape)
+      # print('neg_prob:', neg_prob.shape)
+      # print('acc_prob:', acc_prob.shape)
 
       total_pos = tf.reduce_sum(pos_prob)
       total_acc = tf.reduce_sum(acc_prob)
       total_neg = tf.reduce_sum(neg_prob)
+      total_gamma = tf.reduce_sum(gamma.log_prob(qgamma))
+      total_beta = tf.reduce_sum(beta.log_prob(qbeta))
 
-      log_loss = -(
-        tf.reduce_sum(gamma.log_prob(qgamma)) + \
-        tf.reduce_sum(beta.log_prob(qbeta)) + \
+      log_loss = - ( total_gamma + total_beta + \
         (total_pos + total_acc) * (total_nonzero / num_pos) + \
         (total_neg - total_acc) * (total_zero / num_neg)
       )
@@ -556,15 +551,15 @@ class PoissonRegression(object):
     """ Perform optimization (via Gradient Descent)"""
     with tf.name_scope('optimize'):
       opts = self.opts
-
       learning_rate = opts.learning_rate
       clipping_size = opts.clipping_size
 
       optimizer = tf.train.AdamOptimizer(learning_rate)
       gradients, variables = zip(*optimizer.compute_gradients(log_loss))
       gradients, _ = tf.clip_by_global_norm(gradients, clipping_size)
-      train = optimizer.apply_gradients(zip(gradients, variables))
-      return train, gradients, variables
+
+      train_ = optimizer.apply_gradients(zip(gradients, variables))
+      return train_, gradients, variables
 
   def evaluate(self, G_holdout, Y_holdout):
     """ Perform cross validation on the hold-out set.
@@ -614,33 +609,43 @@ class PoissonRegression(object):
         tf.squeeze(tf.abs(pred_values - Y_values)))
       return mse
 
-  def train(self):
+  def train(self, y_data, G_data):
     """ Trains a single batch """
     opts = self.opts
     batch_size = opts.batch_size
     checkpoint_interval = opts.checkpoint_interval
-    run_metadata = tf.RunMetadata()
-    run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-    if self.step % 500 == 0:
-      # store runtime information
-      _, summary  = self.sess.run(
-          [self.optimizer, self.merged],
-          options=run_options,
-          run_metadata=run_metadata
-      )
-      self.writer.add_summary(summary, self.step)
+    # if self.step % 500 == 0:
+    #   # store runtime information
+    #   run_metadata = tf.RunMetadata()
+    #   run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+    #   _, summary  = self.sess.run(
+    #       [self.optimizer, self.merged],
+    #       options=run_options,
+    #       run_metadata=run_metadata
+    #   )
+    #   self.writer.add_summary(summary, self.step)
+    #   self.writer.add_run_metadata(run_metadata, 'step%d' % i)
+    # elif self.step % 2 == 0:
 
-    elif self.step % 100 == 0:
-      # store loss information and cross-validation information
-      _, summary, err, train_loss = self.sess.run(
-        [self.optimizer, self.merged, self.mean_err, self.log_loss]
-      )
-      print('Step:', self.step, 'Loss:', train_loss)
-      self.writer.add_summary(summary, self.step)
-    else:
-      _ = self.sess.run(
-          [self.optimizer]
-      )
+    # store loss information and cross-validation information
+    # run_metadata = tf.RunMetadata()
+    # run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+    # _, summary, err, train_loss = self.sess.run(
+    #   [self.train_, self.merged, self.mean_err, self.log_loss],
+    #   options=run_options,
+    #   run_metadata=run_metadata
+    # )
+    #print('Step:', self.step, 'Loss:', train_loss)
+    #self.writer.add_summary(summary, self.step)
+    #self.writer.add_run_metadata(run_metadata, 'step%d' % self.step)
+
+    # else:
+    batch = self.sample(y_data)
+    log_loss = self.loss(G_data, y_data, batch)
+    train_step, g, v = self.optimize(log_loss)
+    train_, loss_ = self.sess.run(
+      [train_step, log_loss]
+    )
 
     now = time.time()
     if now - self.last_checkpoint_time > checkpoint_interval:
@@ -679,15 +684,37 @@ def main(_):
   # Model code
   with tf.Graph().as_default(), tf.Session() as session:
     model = PoissonRegression(options, session)
-    model.initialize()
+    # preprocessing (i.e. biom table, metadata, ...)
+    (y_data, y_test, G_data, G_test) = model.preprocess(
+      options.formula,
+      options.train_table, options.train_metadata,
+      options.test_table, options.test_metadata,
+      options.min_sample_count, options.min_feature_count
+    )
+
+    batch = model.sample(y_data)
+    log_loss = model.loss(G_data, y_data, batch)
+    train_step, g, v = model.optimize(log_loss)
+    tf.global_variables_initializer().run()
+
+    train_, grads, loss, beta, gamma, theta = session.run(
+      [train_step, g, log_loss,
+       model.qbeta, model.qgamma, model.theta]
+    )
+
+    # model.initialize(y_data, y_test, G_data, G_test)
     epoch = model.num_nonzero // options.batch_size
     num_iter = int(options.epochs_to_train * epoch)
-    tf.global_variables_initializer().run()
 
     start_time = time.time()
     model.last_checkpoint_time = 0
     for i in tqdm(range(num_iter)):
-      model.train()
+      train_, grads, loss, beta, gamma, theta = session.run(
+        [train_step, g, log_loss,
+         model.qbeta, model.qgamma, model.theta]
+      )
+
+      # model.train(y_data, G_data)
 
     elapsed_time = time.time() - start_time
     print('Elapsed Time: %f seconds' % elapsed_time)
@@ -697,6 +724,7 @@ def main(_):
     # Cross validation
     pred_beta = model.qbeta.eval()
     pred_gamma = model.qgamma.eval()
+
     mse, mrc = cross_validation(
       G_test, pred_beta, pred_gamma, y_test)
     print("MSE: %f, MRC: %f" % (mse, mrc))

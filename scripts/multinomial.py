@@ -214,7 +214,7 @@ def main(_):
       loss = -(tf.reduce_mean(gamma.log_prob(qgamma)) + \
                tf.reduce_mean(beta.log_prob(qbeta)) + \
                tf.reduce_mean(Y.log_prob(Y_ph)) * (N / batch_size))
-
+      loss = tf.Print(loss, [loss])
       optimizer = tf.train.AdamOptimizer(learning_rate)
 
       gradients, variables = zip(*optimizer.compute_gradients(loss))
@@ -292,7 +292,8 @@ def main(_):
       # Cross validation
       pred_beta = qbeta.eval()
       pred_gamma = qgamma.eval()
-      mse, mrc = cross_validation(test_metadata.values, pred_beta, pred_gamma, y_test)
+      mse, mrc = cross_validation(test_metadata.values,
+                                  pred_beta, pred_gamma, y_test)
       print("MSE: %f, MRC: %f" % (mse, mrc))
 
 
