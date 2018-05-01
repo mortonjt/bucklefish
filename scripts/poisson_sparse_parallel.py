@@ -60,9 +60,9 @@ flags.DEFINE_integer("min_sample_count", 1000,
 flags.DEFINE_integer("min_feature_count", 5,
                      "The minimum number of counts a sample needs to be  "
                      "included in the analysis")
-flags.DEFINE_integer("statistics_interval", 5,
+flags.DEFINE_integer("statistics_interval", 10,
                      "Print statistics every n seconds.")
-flags.DEFINE_integer("summary_interval", 5,
+flags.DEFINE_integer("summary_interval", 10,
                      "Save training summary to file every n seconds (rounded "
                      "up to statistics interval).")
 flags.DEFINE_integer("checkpoint_interval", 600,
@@ -135,39 +135,6 @@ class PoissonRegression(object):
     self.opts = options
     self.sess = session
 
-  def initialize(self, y_data, y_test, G_data, G_test):
-    opts = self.opts
-
-    batch = self.sample(
-      y_data, num_pos=opts.batch_size, num_neg=opts.num_neg_samples
-    )
-
-    log_loss = self.loss(G_data, y_data, batch)
-    train_step, grads, variables = self.optimize(log_loss)
-    mean_err = self.evaluate(G_test, y_test)
-
-    tf.global_variables_initializer().run()
-
-    (train_, g, loss_, err_, beta, gamma, theta) = self.sess.run(
-      [train_step, grads, log_loss, mean_err,
-       self.qbeta, self.qgamma, self.theta]
-    )
-
-    self.saver = tf.train.Saver()
-    self.writer = tf.summary.FileWriter(opts.save_path, self.sess.graph)
-
-    # tf.summary.scalar('loss', self.log_loss)
-    tf.summary.histogram('qbeta', self.qbeta)
-    tf.summary.histogram('qgamma', self.qgamma)
-    tf.summary.histogram('theta', self.theta)
-    #tf.summary.scalar('mean_absolute_error', self.mean_err)
-    #for i, g in enumerate(grads):
-    #  tf.summary.histogram('gradient/%s' % variables[i], g)
-
-    self.merged = tf.summary.merge_all()
-    self.log_handle = open(os.path.join(opts.save_path, 'run.log'), 'w')
-    self.step = 0
-
   def preprocess(self, formula,
                  train_table, train_metadata,
                  test_table, test_metadata,
@@ -193,6 +160,23 @@ class PoissonRegression(object):
        Minimum number of total counts within a sample to be kept.
     min_feature_counts : int
        Minimum number of total counts within a feature to be kept.
+
+    Returns
+    -------
+    y_data : tf.SparseTensor
+       Sparse tensor containing training data
+    y_test : tf.SparseTensor
+       Sparse tensor containing testing data
+    G_data : tf.Tensor
+       Constant tensor containing design matrix
+    G_test : tf.Tensor
+       Constant tensor containing design matrix
+    samp_ids : np.array
+       Vector of sample ids.
+    obs_ids : np.array
+       Vector of observation ids.
+    md_ids
+       Vector for covariate names.
 
     Notes
     -----
@@ -248,7 +232,11 @@ class PoissonRegression(object):
     self.y_test = biom_data
     self.G_test = test_metadata.values
 
-    return y_data, y_test, G_data, G_test
+    samp_ids = train_table.ids(axis='sample')
+    obs_ids = train_table.ids(axis='observation')
+    md_ids = np.array(train_metadata.columns)
+
+    return y_data, y_test, G_data, G_test, samp_ids, obs_ids, md_ids
 
 
   def sample(self, y_data, num_pos=50, num_neg=10):
@@ -587,74 +575,35 @@ class PoissonRegression(object):
       obs_ids = tf.gather(Y_holdout.indices, 1, axis=1)
       samp_ids = tf.gather(Y_holdout.indices, 0, axis=1)
 
-      #samp_ids = tf.Print(samp_ids, [samp_ids])
-
       g_data = tf.gather(G_holdout, samp_ids, axis=0)
+
+      # Calculate predicted abundance
+      Gpos = tf.concat(
+        [tf.ones([g_data.shape[0], 1]), g_data],
+        axis=1, name='g_holdout')
+      Vprime = tf.transpose(
+        tf.gather(self.V, obs_ids, axis=1), name='V_holdout')
+      # sparse matrix multiplication for positive samples
+      y_pred = tf.reduce_sum(
+        tf.multiply(
+            Gpos, Vprime),
+        axis=1)
       smax = tf.SparseTensorValue(
         indices=Y_holdout.indices,
-        values=self.inference(g_data, obs_ids),
+        values=y_pred,
         dense_shape=Y_holdout.dense_shape)
 
       smax = tf.sparse_softmax(smax)
 
       holdout_count = tf.gather(holdout_count, samp_ids, axis=0)
-      #holdout_count = tf.Print(holdout_count, [holdout_count])
-      pred_values = tf.cast(tf.multiply(holdout_count, smax.values), tf.float32)
-      #pred_values = tf.cast(smax.values, tf.float32)
-      #pred_values = tf.Print(pred_values, [pred_values])
+      pred_values = tf.cast(tf.multiply(holdout_count, smax.values),
+                            tf.float32)
 
       Y_values = tf.cast(Y_holdout.values, tf.float32)
-      #Y_values = tf.Print(Y_values, [Y_values])
       mse = tf.reduce_mean(
         tf.squeeze(tf.abs(pred_values - Y_values)))
       return mse
 
-  def train(self, y_data, G_data):
-    """ Trains a single batch """
-    opts = self.opts
-    batch_size = opts.batch_size
-    checkpoint_interval = opts.checkpoint_interval
-    # if self.step % 500 == 0:
-    #   # store runtime information
-    #   run_metadata = tf.RunMetadata()
-    #   run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-    #   _, summary  = self.sess.run(
-    #       [self.optimizer, self.merged],
-    #       options=run_options,
-    #       run_metadata=run_metadata
-    #   )
-    #   self.writer.add_summary(summary, self.step)
-    #   self.writer.add_run_metadata(run_metadata, 'step%d' % i)
-    # elif self.step % 2 == 0:
-
-    # store loss information and cross-validation information
-    # run_metadata = tf.RunMetadata()
-    # run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-    # _, summary, err, train_loss = self.sess.run(
-    #   [self.train_, self.merged, self.mean_err, self.log_loss],
-    #   options=run_options,
-    #   run_metadata=run_metadata
-    # )
-    #print('Step:', self.step, 'Loss:', train_loss)
-    #self.writer.add_summary(summary, self.step)
-    #self.writer.add_run_metadata(run_metadata, 'step%d' % self.step)
-
-    # else:
-    batch = self.sample(y_data)
-    log_loss = self.loss(G_data, y_data, batch)
-    train_step, g, v = self.optimize(log_loss)
-    train_, loss_ = self.sess.run(
-      [train_step, log_loss]
-    )
-
-    now = time.time()
-    if now - self.last_checkpoint_time > checkpoint_interval:
-      self.saver.save(self.sess,
-                      os.path.join(opts.save_path, "model.ckpt"),
-                      global_step=self.step)
-      self.last_checkpoint_time = now
-
-    self.step += 1
 
 def main(_):
 
@@ -685,7 +634,8 @@ def main(_):
   with tf.Graph().as_default(), tf.Session() as session:
     model = PoissonRegression(options, session)
     # preprocessing (i.e. biom table, metadata, ...)
-    (y_data, y_test, G_data, G_test) = model.preprocess(
+    (y_data, y_test, G_data, G_test,
+     samp_ids, obs_ids, md_ids ) = model.preprocess(
       options.formula,
       options.train_table, options.train_metadata,
       options.test_table, options.test_metadata,
@@ -694,31 +644,84 @@ def main(_):
 
     batch = model.sample(y_data)
     log_loss = model.loss(G_data, y_data, batch)
-    train_step, g, v = model.optimize(log_loss)
+    train_step, grads, variables = model.optimize(log_loss)
+    mean_err = model.evaluate(G_test, y_test)
     tf.global_variables_initializer().run()
 
-    train_, grads, loss, beta, gamma, theta = session.run(
-      [train_step, g, log_loss,
+    # summary information
+    tf.summary.histogram('qbeta', model.qbeta)
+    tf.summary.histogram('qgamma', model.qgamma)
+    tf.summary.histogram('theta', model.theta)
+    tf.summary.scalar('mean_absolute_error', mean_err)
+    for i, g in enumerate(grads):
+      tf.summary.histogram('gradient/%s' % variables[i], g)
+    merged = tf.summary.merge_all()
+    last_checkpoint_time = 0
+    last_summary_time = 0
+    last_statistics_time = 0
+
+    train_, grads, loss, err, beta, gamma, theta = session.run(
+      [train_step, g, log_loss, mean_err,
        model.qbeta, model.qgamma, model.theta]
     )
 
-    # model.initialize(y_data, y_test, G_data, G_test)
     epoch = model.num_nonzero // options.batch_size
     num_iter = int(options.epochs_to_train * epoch)
+    saver = tf.train.Saver()
+    writer = tf.summary.FileWriter(options.save_path, session.graph)
 
     start_time = time.time()
-    model.last_checkpoint_time = 0
     for i in tqdm(range(num_iter)):
       train_, grads, loss, beta, gamma, theta = session.run(
         [train_step, g, log_loss,
          model.qbeta, model.qgamma, model.theta]
       )
 
-      # model.train(y_data, G_data)
+      # check for summary
+      now = time.time()
+      if now - last_summary_time > options.summary_interval:
+        run_metadata = tf.RunMetadata()
+        run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+        _, summary  = session.run(
+          [train_step, merged],
+          options=run_options,
+          run_metadata=run_metadata)
+        writer.add_summary(summary, i)
+        writer.add_run_metadata(run_metadata, 'step%d' % i)
+        last_summary_time = now
+      # check for statistics
+      if now - last_statistics_time > options.statistics_interval:
+        train_, merged, loss, mean_err = session.run(
+          [train_step, merged, log_loss, mean_err])
+        print('Loss: %f, Mean Err: %f' % (loss, mean_err))
+        writer.add_summary(summary, i)
+        last_statistics_time = now
+      # check for checkpoint
+      if now - last_checkpoint_time > options.checkpoint_interval:
+        saver.save(
+          session, os.path.join(options.save_path, "model.ckpt"),
+          global_step=i)
+        last_checkpoint_time = now
 
     elapsed_time = time.time() - start_time
     print('Elapsed Time: %f seconds' % elapsed_time)
 
+    # save all parameters to the save path
+    train_, grads, loss, beta, gamma, theta = session.run(
+      [train_step, g, log_loss,
+       model.qbeta, model.qgamma, model.theta]
+    )
+    pd.DataFrame(
+      beta, index=md_ids, columns=obs_ids,
+    ).to_csv(os.path.join(options.save_path, 'beta.csv'))
+    pd.DataFrame(
+      gamma, index=['intercept'], columns=obs_ids,
+    ).to_csv(os.path.join(options.save_path, 'gamma.csv'))
+    pd.DataFrame(
+      theta, index=samp_ids, columns=['theta'],
+    ).to_csv(os.path.join(options.save_path, 'theta.csv'))
+
+    # Run final round of cross validation
     y_test = np.array(model.y_test.todense())
     G_test = model.G_test
     # Cross validation
