@@ -282,12 +282,12 @@ class PoissonRegression(object):
       N, D = self.N, self.D
       rows = tf.gather(y_data.indices, 0, axis=1)
       cols = tf.gather(y_data.indices, 1, axis=1)
-      rc_major = tf.cast(rows * D + cols, dtype=tf.int32)
+      rc_major = tf.cast(rows * D + cols, dtype=tf.int64)
       nnz = y_data.indices.shape[0]
 
       # Collect samples from y_data
       true_batch_ids = tf.random_uniform(
-        [opts.batch_size], minval=0, maxval=nnz, dtype=tf.int32)
+        [opts.batch_size], minval=0, maxval=nnz, dtype=tf.int64)
       true_ids = tf.gather(rc_major, true_batch_ids, axis=0)
 
       # cast the sampled results back to row, col, data tuples
@@ -328,7 +328,7 @@ class PoissonRegression(object):
                           name='negative_rows')
       samp_cols = tf.cast(tf.floormod(sampled_ids, D), dtype=tf.int64,
                           name='negative_cols')
-      samp_data = tf.zeros([sampled_ids.shape[0]], dtype=tf.int32,
+      samp_data = tf.zeros([sampled_ids.shape[0]], dtype=tf.int64,
                           name='negative_data')
 
       positive_batch = tf.SparseTensor(
