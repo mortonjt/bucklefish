@@ -1,4 +1,4 @@
-# echo 'multinomial'
+n# echo 'multinomial'
 # python multinomial.py \
 #    --train_biom ../data/88soils/train_88soils_processed.biom \
 #    --train_metadata ../data/88soils/train_88soils_metadata.txt \
@@ -49,8 +49,10 @@ python poisson_sparse_parallel.py \
   --min_sample_count 100 \
   --min_feature_count 10 \
   --save_path ../logs/poisson_sparse_parallel_log \
-  --checkpoint_interval 60 \
-  --epochs_to_train 100
+  --statistics_interval 1 \
+  --summary_interval 1 \
+  --checkpoint_interval 2 \
+  --epochs_to_train 1000
 
 # echo 'poisson ilr'
 # python poisson_sparse_ilr.py \

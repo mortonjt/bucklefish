@@ -660,22 +660,19 @@ def main(_):
     last_summary_time = 0
     last_statistics_time = 0
 
-    train_, grads, loss, err, beta, gamma, theta = session.run(
-      [train_step, g, log_loss, mean_err,
-       model.qbeta, model.qgamma, model.theta]
+    train_, loss, err, beta, gamma, theta = session.run(
+      [train_step, log_loss, mean_err,
+        model.qbeta, model.qgamma, model.theta]
     )
 
     epoch = model.num_nonzero // options.batch_size
     num_iter = int(options.epochs_to_train * epoch)
     saver = tf.train.Saver()
+
     writer = tf.summary.FileWriter(options.save_path, session.graph)
 
     start_time = time.time()
     for i in tqdm(range(num_iter)):
-      train_, grads, loss, beta, gamma, theta = session.run(
-        [train_step, g, log_loss,
-         model.qbeta, model.qgamma, model.theta]
-      )
 
       # check for summary
       now = time.time()
@@ -689,26 +686,23 @@ def main(_):
         writer.add_summary(summary, i)
         writer.add_run_metadata(run_metadata, 'step%d' % i)
         last_summary_time = now
-      # check for statistics
-      if now - last_statistics_time > options.statistics_interval:
-        train_, merged, loss, mean_err = session.run(
-          [train_step, merged, log_loss, mean_err])
-        print('Loss: %f, Mean Err: %f' % (loss, mean_err))
-        writer.add_summary(summary, i)
-        last_statistics_time = now
-      # check for checkpoint
-      if now - last_checkpoint_time > options.checkpoint_interval:
+      elif now - last_checkpoint_time > options.checkpoint_interval:
         saver.save(
           session, os.path.join(options.save_path, "model.ckpt"),
           global_step=i)
         last_checkpoint_time = now
+      else:
+        train_, loss, beta, gamma, theta = session.run(
+          [train_step, log_loss,
+           model.qbeta, model.qgamma, model.theta]
+        )
 
     elapsed_time = time.time() - start_time
     print('Elapsed Time: %f seconds' % elapsed_time)
 
     # save all parameters to the save path
-    train_, grads, loss, beta, gamma, theta = session.run(
-      [train_step, g, log_loss,
+    train_, loss, beta, gamma, theta = session.run(
+      [train_step, log_loss,
        model.qbeta, model.qgamma, model.theta]
     )
     pd.DataFrame(
