@@ -9,6 +9,7 @@ import pandas as pd
 from scipy.stats import pearsonr
 from skbio.stats.composition import clr_inv
 import matplotlib.pyplot as plt
+import numpy.testing as npt
 
 
 def random_poisson_model(num_samples, num_features,
@@ -132,7 +133,6 @@ class PoissonRegressionTest(tf.test.TestCase):
     def setUp(self):
         # specifies if plots should be displayed for diagnostics
         self.display_plots = False
-
 
     def test_sample(self):
         # Need to define the metadata and bioms
@@ -357,6 +357,69 @@ class PoissonRegressionTest(tf.test.TestCase):
                 self.assertIsNotNone(gamma)
                 # Look at mean absolute error
                 self.assertFalse(np.isnan(mad_))
+
+
+    def test_retrieve(self):
+        num_samples = 10
+        num_features = 5
+        ex = random_poisson_model(
+            num_samples, num_features,
+            reps=1, low=-1, high=1,
+            alpha_mean=-4, alpha_scale=1,
+            theta_mean=0, theta_scale=1,
+            gamma_mean=0, gamma_scale=1,
+            kappa_mean=0, kappa_scale=0,
+            beta_mean=0, beta_scale=2
+        )
+        (table, md, basis, sim_alpha, sim_beta, sim_theta,
+         sim_gamma, sim_kappa, sim_eps) = ex
+        N, D = num_samples, num_features
+        p = md.shape[1]   # number of covariates
+
+        opts = Options(batch_size=4, num_neg_samples=3, block_size=3,
+                       train_table=table, train_metadata=md)
+        with tf.Graph().as_default(), tf.Session() as sess:
+            model = PoissonRegression(opts, sess)
+
+            gen = model.retrieve(table, md)
+            y_feed, G_feed = next(gen)
+            indices = np.array([[1, 0],[3, 0], [0, 1],[2, 3]])
+            values = np.array([3., 2., 2., 1.])
+            md = np.array([[-1.], [-0.33333334],
+                           [0.33333334], [1.]])
+            npt.assert_allclose(indices, y_feed.indices)
+            npt.assert_allclose(values, y_feed.values)
+            npt.assert_allclose(md, G_feed)
+            indices0 = indices
+            values0 = values
+            md0 = md
+
+            # grab next block
+            y_feed, G_feed = next(gen)
+            indices = np.array([[0, 0], [0, 1], [2, 3]])
+            values = np.array([1., 3., 1.])
+            md = np.array([[-0.7777778], [-0.11111111], [0.5555556]])
+            npt.assert_allclose(indices, y_feed.indices)
+            npt.assert_allclose(values, y_feed.values)
+            npt.assert_allclose(md, G_feed)
+
+            # grab next block
+            y_feed, G_feed = next(gen)
+            indices = np.array([[0, 0], [1, 0], [2, 0],
+                                [0, 1], [0, 2], [0, 3],
+                                [0, 4], [1, 4]])
+
+            values = np.array([ 1., 4., 4., 1., 2., 10., 5., 2.])
+            md = np.array([[-0.5555556], [0.11111111], [0.7777778]])
+            npt.assert_allclose(indices, y_feed.indices)
+            npt.assert_allclose(values, y_feed.values)
+            npt.assert_allclose(md, G_feed)
+
+            # repeat one more time as a sanity check
+            y_feed, G_feed = next(gen)
+            npt.assert_allclose(indices0, y_feed.indices)
+            npt.assert_allclose(values0, y_feed.values)
+            npt.assert_allclose(md0, G_feed)
 
 
     def test_with_simulation(self):

@@ -52,8 +52,10 @@ flags.DEFINE_integer(
 flags.DEFINE_integer("num_neg_samples", 25,
                      "Negative samples per training sample.")
 flags.DEFINE_integer("batch_size", 512,
-                     "Number of training samples processed per step "
+                     "Number of nonzero entries processed per step "
                      "(size of a minibatch).")
+flags.DEFINE_integer("block_size", 10,
+                     "Number of training samples processed per step ")
 flags.DEFINE_integer("min_sample_count", 1000,
                      "The minimum number of counts a feature needs for it to be "
                      "included in the analysis")
@@ -109,6 +111,78 @@ class Options(object):
     except Exception as err:
       print(err)
 
+def preprocess(formula,
+               train_table, train_metadata,
+               test_table, test_metadata,
+               min_sample_count=10, min_feature_count=10):
+  """ Performs data preprocessing.
+
+  Parameters
+  ----------
+  formula : str
+     Statistical formula specifying the design matrix of covariates
+     in the study design.
+  train_table : biom.Table
+     Biom table containing the feature counts within the training dataset.
+  train_metadata : pd.DataFrame
+     Sample metadata table containing all of the measured covariates in
+     the training dataset.
+  test_table : biom.Table
+     Biom table containing the feature counts within the holdout dataset.
+  test_metadata : pd.DataFrame
+     Sample metadata table containing all of the measured covariates in
+     the holdout test dataset.
+  min_sample_counts : int
+     Minimum number of total counts within a sample to be kept.
+  min_feature_counts : int
+     Minimum number of total counts within a feature to be kept.
+
+  Returns
+  -------
+  train_table : biom.Table
+     Biom table containing the feature counts within the training dataset.
+  train_metadata : pd.DataFrame
+     Sample metadata table containing all of the measured covariates in
+     the training dataset.
+  test_table : biom.Table
+     Biom table containing the feature counts within the holdout dataset.
+  test_metadata : pd.DataFrame
+     Sample metadata table containing all of the measured covariates in
+     the holdout test dataset.
+
+  Notes
+  -----
+  This assumes that the biom tables can fit into memory - will
+  require some extra consideration when this is no longer the case.
+  """
+  # preprocessing
+  train_table, train_metadata = train_table, train_metadata
+  sample_filter = lambda val, id_, md: (
+    (id_ in train_metadata.index) and np.sum(val) > min_sample_count)
+  read_filter = lambda val, id_, md: np.sum(val) > min_feature_count
+  train_table = train_table.filter(sample_filter, axis='sample')
+  train_table = train_table.filter(read_filter, axis='observation')
+  train_metadata = dmatrix(formula, train_metadata, return_type='dataframe')
+  train_table, train_metadata = match(train_table, train_metadata)
+
+  # hold out data preprocessing
+  test_table, test_metadata = test_table, test_metadata
+  metadata_filter = lambda val, id_, md: id_ in test_metadata.index
+  obs_lookup = set(train_table.ids(axis='observation'))
+  feat_filter = lambda val, id_, md: id_ in obs_lookup
+  test_table = test_table.filter(metadata_filter, axis='sample')
+  test_table = test_table.filter(feat_filter, axis='observation')
+  test_metadata = dmatrix(formula, test_metadata, return_type='dataframe')
+  test_table, test_metadata = match(test_table, test_metadata)
+
+  # pad extra columns with zeros, so that we can still make predictions
+  extra_columns = list(set(train_metadata.columns) - set(test_metadata.columns))
+  df = pd.DataFrame({C: np.zeros(test_metadata.shape[0])
+                     for C in extra_columns}, index=test_metadata.index)
+  test_metadata = pd.concat((test_metadata, df), axis=1)
+
+  return train_table, test_table, train_metadata, test_metadata
+
 
 class PoissonRegression(object):
 
@@ -135,108 +209,61 @@ class PoissonRegression(object):
     self.opts = options
     self.sess = session
 
-  def preprocess(self, formula,
-                 train_table, train_metadata,
-                 test_table, test_metadata,
-                 min_sample_count=10, min_feature_count=10):
-    """ Performs data preprocessing.
+    # D = number of features.  N = number of samples
+    # num_nonzero = number of nonzero entries in the table.
+    self.D, self.N = options.train_table.shape
+    self.M = options.block_size
+    self.p = options.train_metadata.shape[1]
+    self.num_nonzero = options.train_table.nnz
+
+  def retrieve(self, train_table, train_metadata):
+    """ Subsample blocks for training.
+
+    This is not exactly like mini-batching, but it will retreive a block
+    in the event that the block cannot fit in memory.
 
     Parameters
     ----------
-    formula : str
-       Statistical formula specifying the design matrix of covariates
-       in the study design.
     train_table : biom.Table
        Biom table containing the feature counts within the training dataset.
     train_metadata : pd.DataFrame
        Sample metadata table containing all of the measured covariates in
        the training dataset.
-    test_table : biom.Table
-       Biom table containing the feature counts within the holdout dataset.
-    test_metadata : pd.DataFrame
-       Sample metadata table containing all of the measured covariates in
-       the holdout test dataset.
-    min_sample_counts : int
-       Minimum number of total counts within a sample to be kept.
-    min_feature_counts : int
-       Minimum number of total counts within a feature to be kept.
 
-    Returns
-    -------
-    y_data : tf.SparseTensor
-       Sparse tensor containing training data
-    y_test : tf.SparseTensor
-       Sparse tensor containing testing data
-    G_data : tf.Tensor
-       Constant tensor containing design matrix
-    G_test : tf.Tensor
-       Constant tensor containing design matrix
-    samp_ids : np.array
-       Vector of sample ids.
-    obs_ids : np.array
-       Vector of observation ids.
-    md_ids
-       Vector for covariate names.
-
-    Notes
-    -----
-    This assumes that the biom tables can fit into memory - will
-    require some extra consideration when this is no longer the case.
+    Yields
+    ------
+    y_feed : tf.SparseTensorValue
+       Sparse Tensor representing small minibatch
+    G_feed : tf.placeholder
     """
-    # preprocessing
-    train_table, train_metadata = train_table, train_metadata
-    sample_filter = lambda val, id_, md: (
-      (id_ in train_metadata.index) and np.sum(val) > min_sample_count)
-    read_filter = lambda val, id_, md: np.sum(val) > min_feature_count
-    train_table = train_table.filter(sample_filter, axis='sample')
-    train_table = train_table.filter(read_filter, axis='observation')
-    train_metadata = dmatrix(formula, train_metadata, return_type='dataframe')
-    train_table, train_metadata = match(train_table, train_metadata)
+    opts = self.opts
+    # partition the biom table into multiple chunks and yield
+    # the next chunk at retreival
+    #train_table = train_table.matrix_data.tocoo().T
+    #biom_test = test_table.matrix_data.tocoo().T
+    idx = np.arange(len(train_metadata)) % opts.block_size
+    md = pd.DataFrame({'block_id': idx}, index=train_table.ids(axis='sample'))
+    md = md.T.to_dict()
+    train_table.add_metadata(md)
 
-    # hold out data preprocessing
-    test_table, test_metadata = test_table, test_metadata
-    metadata_filter = lambda val, id_, md: id_ in test_metadata.index
-    obs_lookup = set(train_table.ids(axis='observation'))
-    feat_filter = lambda val, id_, md: id_ in obs_lookup
-    test_table = test_table.filter(metadata_filter, axis='sample')
-    test_table = test_table.filter(feat_filter, axis='observation')
-    test_metadata = dmatrix(formula, test_metadata, return_type='dataframe')
-    test_table, test_metadata = match(test_table, test_metadata)
+    f = lambda id_, md: md['block_id']
+    gen = train_table.partition(f, axis='sample')
+    while True:
+      try:
+        i, table = next(gen)
+        ids = table.ids(axis='sample')
+        table = table.matrix_data.tocoo().T
+        y_feed = tf.SparseTensorValue(
+          indices=np.array([table.row,  table.col]).T,
+          values=table.data,
+          dense_shape=table.shape)
+        md = train_metadata.loc[ids]
+        G_feed = md.values.astype(np.float32)
 
-    # pad extra columns with zeros, so that we can still make predictions
-    extra_columns = list(set(train_metadata.columns) - set(test_metadata.columns))
-    df = pd.DataFrame({C: np.zeros(test_metadata.shape[0])
-                       for C in extra_columns}, index=test_metadata.index)
-    test_metadata = pd.concat((test_metadata, df), axis=1)
+        yield y_feed, G_feed
 
-    biom_train = train_table.matrix_data.tocoo().T
-    y_data = tf.SparseTensorValue(
-      indices=np.array([biom_train.row,  biom_train.col]).T,
-      values=biom_train.data,
-      dense_shape=biom_train.shape)
-    G_data = tf.constant(train_metadata.values, dtype=tf.float32)
-
-    biom_test = test_table.matrix_data.tocoo().T
-    G_test = tf.constant(test_metadata.values, dtype=tf.float32)
-    y_test = tf.SparseTensorValue(
-      indices=np.array([biom_test.row,  biom_test.col]).T,
-      values=biom_test.data,
-      dense_shape=biom_test.shape)
-
-    # D = number of features.  N = number of samples
-    # num_nonzero = number of nonzero entries in the table.
-    self.D, self.N = train_table.shape
-    self.p = train_metadata.shape[1]
-    self.num_nonzero = train_table.nnz
-
-    self.y_test = biom_test
-    self.G_test = test_metadata.values
-
-    samp_ids = train_table.ids(axis='sample')
-    obs_ids = train_table.ids(axis='observation')
-    md_ids = np.array(train_metadata.columns)
-
-    return y_data, y_test, G_data, G_test, samp_ids, obs_ids, md_ids
+      except:
+        gen = train_table.partition(f, axis='sample')
 
 
   def sample(self, y_data, num_pos=50, num_neg=10):
@@ -302,6 +329,7 @@ class PoissonRegression(object):
                             dtype=tf.int64)
 
       # Then run tf.nn.uniform_candidate_sampler to sample the negative samples
+      # TODO: This line breaks because of overflow.
       sampled_ids, num_exp_pos, num_exp_neg = tf.nn.uniform_candidate_sampler(
         true_classes=true_labels,
         num_true=1,
@@ -623,6 +651,7 @@ def main(_):
     epochs_to_train=FLAGS.epochs_to_train,
     num_neg_samples=FLAGS.num_neg_samples,
     batch_size=FLAGS.batch_size,
+    block_size=FLAGS.block_size,
     min_sample_count=FLAGS.min_sample_count,
     min_feature_count=FLAGS.min_feature_count,
     statistics_interval=FLAGS.statistics_interval,
@@ -630,17 +659,33 @@ def main(_):
     checkpoint_interval=FLAGS.checkpoint_interval
   )
 
+  # preprocessing (i.e. biom table, metadata, ...)
+  (biom_train, biom_test,
+   train_metadata, test_metadata) = model.preprocess(
+     options.formula,
+     options.train_table, options.train_metadata,
+     options.test_table, options.test_metadata,
+     options.min_sample_count, options.min_feature_count
+   )
+  samp_ids = biom_train.ids(axis='sample')
+  obs_ids = biom_train.ids(axis='observation')
+  md_ids = np.array(train_metadata.columns)
+
   # Model code
   with tf.Graph().as_default(), tf.Session() as session:
     model = PoissonRegression(options, session)
-    # preprocessing (i.e. biom table, metadata, ...)
-    (y_data, y_test, G_data, G_test,
-     samp_ids, obs_ids, md_ids ) = model.preprocess(
-      options.formula,
-      options.train_table, options.train_metadata,
-      options.test_table, options.test_metadata,
-      options.min_sample_count, options.min_feature_count
-    )
+
+    y_data = tf.sparse_placeholder(
+      dtype=tf.int32, shape=(M, D))
+    G_data = tf.placeholder(
+      tf.float32, shape=(M, p))
+
+    # setup cross validation data
+    G_test = tf.constant(test_metadata.values, dtype=tf.float32)
+    y_test = tf.SparseTensorValue(
+      indices=np.array([biom_test.row,  biom_test.col]).T,
+      values=biom_test.data,
+      dense_shape=biom_test.shape)
 
     batch = model.sample(y_data)
     log_loss = model.loss(G_data, y_data, batch)
@@ -660,9 +705,12 @@ def main(_):
     last_summary_time = 0
     last_statistics_time = 0
 
+    # initialize with small minibatch
+    y_feed, G_feed = model.retrieve(0, biom_train, train_metadata)
     train_, loss, err, beta, gamma, theta = session.run(
       [train_step, log_loss, mean_err,
-        model.qbeta, model.qgamma, model.theta]
+        model.qbeta, model.qgamma, model.theta],
+      feed_dict={y_data: y_feed, G_data: G_feed}
     )
 
     epoch = model.num_nonzero // options.batch_size
@@ -672,7 +720,18 @@ def main(_):
     writer = tf.summary.FileWriter(options.save_path, session.graph)
 
     start_time = time.time()
-    for i in tqdm(range(num_iter)):
+    k = 0
+    for i in tqdm(range(1, num_iter)):
+
+      # grab the next block
+      if i % options.block_size == 0:
+        y_feed, G_feed = model.retrieve(biom_train, train_metadata)
+        train_, loss, err, beta, gamma, theta = session.run(
+          [train_step, log_loss, mean_err,
+            model.qbeta, model.qgamma, model.theta],
+          feed_dict={y_data: y_feed, G_data: G_feed}
+        )
+        k = k % options.block_size
 
       # check for summary
       now = time.time()
