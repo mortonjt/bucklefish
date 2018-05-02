@@ -209,19 +209,19 @@ class PoissonRegression(object):
                        for C in extra_columns}, index=test_metadata.index)
     test_metadata = pd.concat((test_metadata, df), axis=1)
 
-    biom_data = train_table.matrix_data.tocoo().T
+    biom_train = train_table.matrix_data.tocoo().T
     y_data = tf.SparseTensorValue(
-      indices=np.array([biom_data.row,  biom_data.col]).T,
-      values=biom_data.data,
-      dense_shape=coo_matrix.shape)
+      indices=np.array([biom_train.row,  biom_train.col]).T,
+      values=biom_train.data,
+      dense_shape=biom_train.shape)
     G_data = tf.constant(train_metadata.values, dtype=tf.float32)
 
-    biom_data = test_table.matrix_data.tocoo().T
+    biom_test = test_table.matrix_data.tocoo().T
     G_test = tf.constant(test_metadata.values, dtype=tf.float32)
     y_test = tf.SparseTensorValue(
-      indices=np.array([biom_data.row,  biom_data.col]).T,
-      values=biom_data.data,
-      dense_shape=biom_data.shape)
+      indices=np.array([biom_test.row,  biom_test.col]).T,
+      values=biom_test.data,
+      dense_shape=biom_test.shape)
 
     # D = number of features.  N = number of samples
     # num_nonzero = number of nonzero entries in the table.
@@ -229,7 +229,7 @@ class PoissonRegression(object):
     self.p = train_metadata.shape[1]
     self.num_nonzero = train_table.nnz
 
-    self.y_test = biom_data
+    self.y_test = biom_test
     self.G_test = test_metadata.values
 
     samp_ids = train_table.ids(axis='sample')
@@ -287,7 +287,7 @@ class PoissonRegression(object):
 
       # Collect samples from y_data
       true_batch_ids = tf.random_uniform(
-        [opts.batch_size], maxval=nnz, dtype=tf.int32)
+        [opts.batch_size], minval=0, maxval=nnz, dtype=tf.int32)
       true_ids = tf.gather(rc_major, true_batch_ids, axis=0)
 
       # cast the sampled results back to row, col, data tuples

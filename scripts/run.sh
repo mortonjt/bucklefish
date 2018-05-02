@@ -1,4 +1,4 @@
-n# echo 'multinomial'
+# echo 'multinomial'
 # python multinomial.py \
 #    --train_biom ../data/88soils/train_88soils_processed.biom \
 #    --train_metadata ../data/88soils/train_88soils_metadata.txt \
