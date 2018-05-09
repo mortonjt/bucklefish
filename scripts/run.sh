@@ -34,7 +34,7 @@
 #   --epochs_to_train 100
 
 echo 'poisson_parallel'
-python poisson_sparse_parallel.py \
+python poisson_sparse_full.py \
   --train_biom ../data/88soils/train_88soils_processed.biom \
   --train_metadata ../data/88soils/train_88soils_metadata.txt \
   --test_biom ../data/88soils/test_88soils_processed.biom \
@@ -48,11 +48,11 @@ python poisson_sparse_parallel.py \
   --clipping_size 100 \
   --min_sample_count 100 \
   --min_feature_count 10 \
-  --save_path ../logs/poisson_sparse_parallel_log \
+  --save_path ../logs/poisson_sparse_full_log \
   --statistics_interval 1 \
   --summary_interval 1 \
   --checkpoint_interval 2 \
-  --epochs_to_train 1000
+  --epochs_to_train 100
 
 # echo 'poisson ilr'
 # python poisson_sparse_ilr.py \

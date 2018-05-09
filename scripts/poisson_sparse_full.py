@@ -228,8 +228,6 @@ class PoissonRegression(object):
       if not os.path.exists(self.save_path):
         os.makedirs(self.save_path)
 
-      self.formula = self.formula + '+0'
-
       if isinstance(self.train_biom, str):
         self.train_table = load_table(self.train_biom)
       elif isinstance(self.train_biom, Table):
@@ -487,10 +485,10 @@ def main(_):
   test_biom = load_table(FLAGS.test_biom)
   train_metadata = pd.read_table(FLAGS.train_metadata, index_col=0)
   test_metadata = pd.read_table(FLAGS.test_metadata, index_col=0)
-
+  formula = FLAGS.formula + '+0'
   (train_table, test_biom,
    train_metadata, test_metadata) = preprocess(
-     FLAGS.formula,
+     formula,
      train_biom, train_metadata,
      test_biom, test_metadata,
      FLAGS.min_sample_count, FLAGS.min_feature_count
@@ -508,7 +506,7 @@ def main(_):
       test_biom=test_biom,
       train_metadata=train_metadata,
       test_metadata=test_metadata,
-      formula=FLAGS.formula,
+      formula=formula,
       learning_rate=FLAGS.learning_rate,
       clipping_size=FLAGS.clipping_size,
       beta_mean=FLAGS.beta_mean,
@@ -541,8 +539,8 @@ def main(_):
       values=biom_test.data,
       dense_shape=biom_test.shape)
 
-    batch = model.sample(y_data)
-    log_loss = model.loss(G_data, y_data, batch)
+    positive_batch, random_batch = model.sample(y_data)
+    log_loss = model.loss(G_data, y_data, positive_batch, random_batch)
     train_step, grads, variables = model.optimize(log_loss)
     mean_err = model.evaluate(G_test, y_test)
     tf.global_variables_initializer().run()
@@ -620,8 +618,9 @@ def main(_):
     ).to_csv(os.path.join(model.save_path, 'gamma.csv'))
 
     # Run final round of cross validation
-    y_test = np.array(model.y_test.todense())
-    G_test = model.G_test
+    y_test = np.array(test_biom.matrix_data.todense()).T
+    G_test = test_metadata.values
+
     # Cross validation
     pred_beta = model.qbeta.eval()
     pred_gamma = model.qgamma.eval()

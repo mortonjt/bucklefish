@@ -202,7 +202,10 @@ def main(_):
 
     qgamma = tf.Variable(tf.random_normal([1, D]), name='qgamma')
     # sample bias (for overdispersion)
-    theta = tf.Variable(tf.random_normal([N, 1]), name='theta')
+    # theta = tf.Variable(tf.random_normal([N, 1]), name='theta')
+    theta = tf.constant(
+      np.log(train_table.sum(axis='sample')), dtype=tf.float32)
+
     qbeta = tf.Variable(tf.random_normal([p, D]), name='qB')
 
     # species bias

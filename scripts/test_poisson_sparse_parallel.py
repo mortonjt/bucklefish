@@ -132,7 +132,7 @@ class PoissonRegressionTest(tf.test.TestCase):
 
     def setUp(self):
         # specifies if plots should be displayed for diagnostics
-        self.display_plots = False
+        self.display_plots = True
 
     def test_sample(self):
         # Need to define the metadata and bioms
@@ -154,6 +154,8 @@ class PoissonRegressionTest(tf.test.TestCase):
 
                 model = PoissonRegression(opts, sess)
                 model.N = N
+                model.M = N
+                model.num_nonzero = len(row)
                 model.D = D
 
                 pos, neg, acc, p, n = model.sample(y_data)
@@ -203,7 +205,6 @@ class PoissonRegressionTest(tf.test.TestCase):
 
             self.assertIsNotNone(model.qbeta)
             self.assertIsNotNone(model.qgamma)
-            self.assertIsNotNone(model.theta)
             self.assertIsNotNone(y_pred)
             self.assertIsNotNone(beta)
             self.assertIsNotNone(gamma)
@@ -233,6 +234,7 @@ class PoissonRegressionTest(tf.test.TestCase):
 
                 model = PoissonRegression(opts, sess)
                 model.N = N
+                model.M = N
                 model.D = D
                 model.p = p
                 model.num_nonzero = table.nnz
@@ -277,6 +279,7 @@ class PoissonRegressionTest(tf.test.TestCase):
 
                 model = PoissonRegression(opts, sess)
                 model.N = N
+                model.M = N
                 model.D = D
                 model.p = p
                 model.num_nonzero = table.nnz
@@ -288,11 +291,11 @@ class PoissonRegressionTest(tf.test.TestCase):
                 train_, grads, loss_1, beta, gamma = sess.run(
                         [train, g, log_loss, model.qbeta, model.qgamma]
                 )
-                print(beta)
-                train_, loss_2, beta, gamma = sess.run(
+                for _ in range(10):
+                    train_, loss_2, beta, gamma = sess.run(
                         [train, log_loss, model.qbeta, model.qgamma]
-                )
-                print(beta)
+                    )
+
                 self.assertIsNotNone(beta)
                 self.assertIsNotNone(gamma)
                 # make sure that there is an actual improvement wrt loss
@@ -340,6 +343,7 @@ class PoissonRegressionTest(tf.test.TestCase):
 
                 model = PoissonRegression(opts, sess)
                 model.N = N
+                model.M = N
                 model.D = D
                 model.p = p
                 model.num_nonzero = table.nnz
@@ -380,13 +384,18 @@ class PoissonRegressionTest(tf.test.TestCase):
                        train_table=table, train_metadata=md)
         with tf.Graph().as_default(), tf.Session() as sess:
             model = PoissonRegression(opts, sess)
-
+            np.random.seed(0)
             gen = model.retrieve(table, md)
             y_feed, G_feed = next(gen)
-            indices = np.array([[1, 0],[3, 0], [0, 1],[2, 3]])
-            values = np.array([3., 2., 2., 1.])
-            md = np.array([[-1.], [-0.33333334],
-                           [0.33333334], [1.]])
+
+            indices = np.array(
+                [[0, 0], [2, 0], [0, 1],
+                 [0, 2], [0, 3], [0, 4]])
+            values = np.array([ 1.,  4.,  1.,  2., 10.,  5.])
+            md = np.array(
+                [[-0.5555556], [-0.11111111], [ 0.7777778]]
+            )
+
             npt.assert_allclose(indices, y_feed.indices)
             npt.assert_allclose(values, y_feed.values)
             npt.assert_allclose(md, G_feed)
@@ -394,38 +403,60 @@ class PoissonRegressionTest(tf.test.TestCase):
             values0 = values
             md0 = md
 
-            # grab next block
-            y_feed, G_feed = next(gen)
-            indices = np.array([[0, 0], [0, 1], [2, 3]])
-            values = np.array([1., 3., 1.])
-            md = np.array([[-0.7777778], [-0.11111111], [0.5555556]])
-            npt.assert_allclose(indices, y_feed.indices)
-            npt.assert_allclose(values, y_feed.values)
-            npt.assert_allclose(md, G_feed)
 
-            # grab next block
-            y_feed, G_feed = next(gen)
-            indices = np.array([[0, 0], [1, 0], [2, 0],
-                                [0, 1], [0, 2], [0, 3],
-                                [0, 4], [1, 4]])
+    def test_retrieve_sample(self):
+        np.random.seed(4088048882)
+        num_samples = 10
+        num_features = 5
+        ex = random_poisson_model(
+            num_samples, num_features,
+            reps=1, low=-1, high=1,
+            alpha_mean=-4, alpha_scale=1,
+            theta_mean=0, theta_scale=1,
+            gamma_mean=0, gamma_scale=1,
+            kappa_mean=0, kappa_scale=0,
+            beta_mean=0, beta_scale=2
+        )
+        (table, md, basis, sim_alpha, sim_beta, sim_theta,
+         sim_gamma, sim_kappa, sim_eps) = ex
+        N, D = num_samples, num_features
+        M = 2
+        p = md.shape[1]   # number of covariates
 
-            values = np.array([ 1., 4., 4., 1., 2., 10., 5., 2.])
-            md = np.array([[-0.5555556], [0.11111111], [0.7777778]])
-            npt.assert_allclose(indices, y_feed.indices)
-            npt.assert_allclose(values, y_feed.values)
-            npt.assert_allclose(md, G_feed)
+        opts = Options(batch_size=4, num_neg_samples=3, block_size=M,
+                       learning_rate=1e-1,
+                       clipping_size=10,
+                       beta_mean=0, beta_scale=1,
+                       gamma_mean=0, gamma_scale=1,
+                       train_table=table, train_metadata=md)
+        with tf.Graph().as_default(), tf.Session() as sess:
+            model = PoissonRegression(opts, sess)
+            model.p = p
 
-            # repeat one more time as a sanity check
-            y_feed, G_feed = next(gen)
-            npt.assert_allclose(indices0, y_feed.indices)
-            npt.assert_allclose(values0, y_feed.values)
-            npt.assert_allclose(md0, G_feed)
+            model.initialize()
+            gen = model.retrieve(table, md)
+            y_data, G_data = next(gen)
+            print('y_data: ', y_data)
+            print('D:', model.D)
+            batch = model.sample(y_data)
+            log_loss = model.loss(G_data, y_data, batch)
+            train, g, v = model.optimize(log_loss)
+            tf.global_variables_initializer().run()
+            train_, grads, loss_1, beta, gamma = sess.run(
+                    [train, g, log_loss,
+                     model.qbeta, model.qgamma]
+            )
 
+            for _ in range(100):
+                train_, loss_2, beta, gamma = sess.run(
+                        [train, log_loss,
+                         model.qbeta, model.qgamma]
+                )
 
     def test_with_simulation(self):
 
         num_samples = 100
-        num_features = 1000
+        num_features = 50
         ex = random_poisson_model(
             num_samples, num_features,
             reps=1, low=-1, high=1,
@@ -447,8 +478,8 @@ class PoissonRegressionTest(tf.test.TestCase):
         opts = Options(batch_size=500, num_neg_samples=500,
                        learning_rate=1e-1,
                        clipping_size=10,
-                       beta_mean=0, beta_scale=2,
                        save_path='tf_debug',
+                       beta_mean=0, beta_scale=2,
                        gamma_mean=0, gamma_scale=1)
         with tf.Graph().as_default(), tf.Session() as sess:
             y_data = tf.SparseTensorValue(
@@ -460,6 +491,7 @@ class PoissonRegressionTest(tf.test.TestCase):
 
             model = PoissonRegression(opts, sess)
             model.N = N
+            model.M = N
             model.D = D
             model.p = p
             model.num_nonzero = table.nnz
@@ -468,22 +500,20 @@ class PoissonRegressionTest(tf.test.TestCase):
             log_loss = model.loss(G_data, y_data, batch)
             train, g, v = model.optimize(log_loss)
             tf.global_variables_initializer().run()
-            train_, grads, loss_1, beta, gamma, theta = sess.run(
+            train_, grads, loss_1, beta, gamma = sess.run(
                     [train, g, log_loss,
-                     model.qbeta, model.qgamma, model.theta]
+                     model.qbeta, model.qgamma]
             )
             for _ in range(100):
-                train_, loss_2, beta, gamma, theta = sess.run(
+                train_, loss_2, beta, gamma = sess.run(
                         [train, log_loss,
-                         model.qbeta, model.qgamma, model.theta]
+                         model.qbeta, model.qgamma]
                 )
 
             beta_corr, bval = pearsonr(beta.ravel(),
                                        sim_beta.values.ravel() @ basis)
             gamma_corr, gval = pearsonr(gamma.ravel(),
                                         sim_gamma.values.ravel() @ basis)
-            theta_corr, tval = pearsonr(theta.ravel(),
-                                        sim_theta.values.ravel())
 
             if self.display_plots:
                 x, y = beta.ravel(), sim_beta.values.ravel() @ basis
@@ -506,19 +536,19 @@ class PoissonRegressionTest(tf.test.TestCase):
                 ax.set_ylabel('Actual')
                 fig.savefig('gamma.pdf')
 
-                x, y = theta.ravel(), sim_theta.values.ravel()
-                fig, ax = plt.subplots()
-                mx = np.linspace(min([x.min(), y.min()]),
-                                 max([x.max(), y.max()]))
-                ax.plot(mx, mx, '-k')
-                ax.scatter(x, y)
-                ax.set_xlabel('Predicted')
-                ax.set_ylabel('Actual')
-                fig.savefig('theta.pdf')
+                # x, y = theta.ravel(), sim_theta.values.ravel()
+                # fig, ax = plt.subplots()
+                # mx = np.linspace(min([x.min(), y.min()]),
+                #                  max([x.max(), y.max()]))
+                # ax.plot(mx, mx, '-k')
+                # ax.scatter(x, y)
+                # ax.set_xlabel('Predicted')
+                # ax.set_ylabel('Actual')
+                # fig.savefig('theta.pdf')
 
             self.assertGreater(beta_corr, 0.7)
             self.assertGreater(gamma_corr, 0.7)
-            self.assertGreater(theta_corr, 0.7)
+            # self.assertGreater(theta_corr, 0.7)
 
 
 if __name__ == "__main__":

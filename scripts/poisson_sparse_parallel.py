@@ -209,12 +209,14 @@ class PoissonRegression(object):
     self.opts = options
     self.sess = session
 
+
+  def initialize(self):
+    """ Configures model with specified parameters. """
+    options = self.opts
     # D = number of features.  N = number of samples
     # num_nonzero = number of nonzero entries in the table.
     self.D, self.N = options.train_table.shape
     self.M = options.block_size
-    self.p = options.train_metadata.shape[1]
-    self.num_nonzero = options.train_table.nnz
 
   def retrieve(self, train_table, train_metadata):
     """ Subsample blocks for training.
@@ -239,31 +241,20 @@ class PoissonRegression(object):
     opts = self.opts
     # partition the biom table into multiple chunks and yield
     # the next chunk at retreival
-    #train_table = train_table.matrix_data.tocoo().T
-    #biom_test = test_table.matrix_data.tocoo().T
-    idx = np.arange(len(train_metadata)) % opts.block_size
-    md = pd.DataFrame({'block_id': idx}, index=train_table.ids(axis='sample'))
-    md = md.T.to_dict()
-    train_table.add_metadata(md)
-
-    f = lambda id_, md: md['block_id']
-    gen = train_table.partition(f, axis='sample')
+    k = opts.block_size
     while True:
-      try:
-        i, table = next(gen)
-        ids = table.ids(axis='sample')
-        table = table.matrix_data.tocoo().T
-        y_feed = tf.SparseTensorValue(
-          indices=np.array([table.row,  table.col]).T,
-          values=table.data,
-          dense_shape=table.shape)
-        md = train_metadata.loc[ids]
-        G_feed = md.values.astype(np.float32)
+      table = train_table.subsample(opts.block_size, by_id=True)
+      md = train_metadata.loc[table.ids(axis='sample')]
 
-        yield y_feed, G_feed
+      ids = table.ids(axis='sample')
+      table = table.matrix_data.tocoo().T
 
-      except:
-        gen = train_table.partition(f, axis='sample')
+      y_feed = tf.SparseTensorValue(
+        indices=np.array([table.row,  table.col]).T,
+        values=table.data,
+        dense_shape=table.shape)
+      G_feed = md.values.astype(np.float32)
+      yield y_feed, G_feed
 
 
   def sample(self, y_data, num_pos=50, num_neg=10):
@@ -301,20 +292,25 @@ class PoissonRegression(object):
     """
     with tf.name_scope('sample'):
       opts = self.opts
+      D, M = self.D, self.M
+      nnz = tf.size(y_data.values, out_type=tf.int32)
 
       # Create a negative sampling scheme
       # First create all of the true classes using row major order
       # All of the entries in the sparse matrix is a possible class
       # But only the non-zero entries are true classes
-      N, D = self.N, self.D
-      rows = tf.gather(y_data.indices, 0, axis=1)
-      cols = tf.gather(y_data.indices, 1, axis=1)
-      rc_major = tf.cast(rows * D + cols, dtype=tf.int64)
-      nnz = y_data.indices.shape[0]
+      rows = tf.cast(tf.gather(y_data.indices, 0, axis=1), dtype=tf.int32)
+      cols = tf.cast(tf.gather(y_data.indices, 1, axis=1), dtype=tf.int32)
 
+      rows = tf.Print(rows, [rows])
+      #cols = tf.Print(cols, [cols])
+      rowD = rows * D
+      rowD = tf.Print(rowD, [rowD])
+      rc_major = tf.cast(rowD + cols, dtype=tf.int32)
+      #rc_major = tf.Print(rc_major, [rc_major])
       # Collect samples from y_data
       true_batch_ids = tf.random_uniform(
-        [opts.batch_size], minval=0, maxval=nnz, dtype=tf.int64)
+        [opts.batch_size], maxval=nnz, dtype=tf.int32)
       true_ids = tf.gather(rc_major, true_batch_ids, axis=0)
 
       # cast the sampled results back to row, col, data tuples
@@ -327,14 +323,13 @@ class PoissonRegression(object):
                             name='positive_data')
       true_labels = tf.cast(tf.reshape(true_ids, [opts.batch_size, 1]),
                             dtype=tf.int64)
-
       # Then run tf.nn.uniform_candidate_sampler to sample the negative samples
       # TODO: This line breaks because of overflow.
       sampled_ids, num_exp_pos, num_exp_neg = tf.nn.uniform_candidate_sampler(
         true_classes=true_labels,
         num_true=1,
         num_sampled=opts.num_neg_samples,
-        range_max=N*D,
+        range_max=M * D,
         unique=True
       )
 
@@ -349,7 +344,8 @@ class PoissonRegression(object):
                          name='hit_rows')
       hit_cols = tf.cast(tf.floormod(hit_ids, D), dtype=tf.int64,
                          name='hit_cols')
-      hit_data = tf.gather(y_data.values, true_acc,
+      yvals = y_data.values
+      hit_data = tf.gather(yvals, true_acc,
                            name='hit_data')
 
       samp_rows = tf.cast(tf.floordiv(sampled_ids, D), dtype=tf.int64,
@@ -362,17 +358,17 @@ class PoissonRegression(object):
       positive_batch = tf.SparseTensor(
         indices=tf.concat([tf.reshape(true_rows, [-1, 1]),
                            tf.reshape(true_cols, [-1, 1])], axis=1),
-        values=true_data, dense_shape=[N, D])
+        values=true_data, dense_shape=[M, D])
 
       accident_batch = tf.SparseTensor(
         indices=tf.concat([tf.reshape(hit_rows, [-1, 1]),
                            tf.reshape(hit_cols, [-1, 1])], axis=1),
-        values=hit_data, dense_shape=[N, D])
+        values=hit_data, dense_shape=[M, D])
 
       negative_batch = tf.SparseTensor(
         indices=tf.concat([tf.reshape(samp_rows, [-1, 1]),
                            tf.reshape(samp_cols, [-1, 1])], axis=1),
-        values=samp_data, dense_shape=[N, D])
+        values=samp_data, dense_shape=[M, D])
 
       return (positive_batch, negative_batch, accident_batch,
               num_exp_pos, num_exp_neg)
@@ -400,10 +396,8 @@ class PoissonRegression(object):
       opts = self.opts
 
       # more preprocessing
-      # how to actually get this???
       p = self.p
       N, D = self.N, self.D
-
       pos_col = obs_id
 
       # Regression coefficients
@@ -411,7 +405,6 @@ class PoissonRegression(object):
       qbeta = tf.Variable(tf.random_normal([p, D]), name='qbeta')
 
       # sample bias (for overdispersion)
-      theta = tf.Variable(tf.random_normal([N, 1]), name='theta')
       self.V = tf.concat([qgamma, qbeta], axis=0, name='V')
 
       # add bias terms for samples
@@ -423,15 +416,12 @@ class PoissonRegression(object):
         tf.gather(self.V, pos_col, axis=1), name='Vprime')
       # sparse matrix multiplication for positive samples
       pos_prime = tf.reduce_sum(
-        tf.multiply(
-            Gpos, Vprime),
-        axis=1)
+        tf.multiply(Gpos, Vprime), axis=1)
       y_pred = pos_prime
 
       # save parameters to model
       self.qbeta = qbeta
       self.qgamma = qgamma
-      self.theta = theta
 
       return y_pred
 
@@ -474,7 +464,7 @@ class PoissonRegression(object):
       gamma_mean, gamma_scale = opts.gamma_mean, opts.gamma_scale
       beta_mean, beta_scale = opts.beta_mean, opts.beta_scale
       N, D, p = self.N, self.D, self.p
-      num_nonzero = self.num_nonzero
+      num_nonzero = tf.size(y_data.values, out_type=tf.float32)
 
       # unpack sparse tensors
       pos_data = positive_batch.values  # nonzero examples
@@ -491,14 +481,15 @@ class PoissonRegression(object):
       # obtain prediction to then calculate loss
       Gpos = tf.gather(G_data, pos_row, axis=0)
       y_pred = self.inference(Gpos, pos_col)
-      qbeta, qgamma, theta = self.qbeta, self.qgamma, self.theta
+      theta = tf.log(
+        tf.cast(tf.sparse_reduce_sum(y_data, axis=1), dtype=tf.float32))
+      qbeta, qgamma = self.qbeta, self.qgamma
 
       # Actual calculation of loss is below.
-      # add sample bias
+      # Adding sample bias
       y_pred += tf.reshape(tf.gather(theta, pos_row), shape=[batch_size])
-      total_zero = tf.constant(N*D - num_nonzero,
-                               dtype=tf.float32)
-      total_nonzero = tf.constant(num_nonzero, dtype=tf.float32)
+      total_zero = tf.constant(N*D, dtype=tf.float32) - num_nonzero
+      total_nonzero = num_nonzero
       pos_poisson = Poisson(log_rate=y_pred, name='Y')
 
       # Distributions species bias
@@ -546,10 +537,6 @@ class PoissonRegression(object):
       pos_prob = pos_poisson.log_prob(pos_data)
       neg_prob = neg_poisson.log_prob(neg_data)
       acc_prob = acc_poisson.log_prob(acc_data)
-
-      # print('pos_prob:', pos_prob.shape)
-      # print('neg_prob:', neg_prob.shape)
-      # print('acc_prob:', acc_prob.shape)
 
       total_pos = tf.reduce_sum(pos_prob)
       total_acc = tf.reduce_sum(acc_prob)
@@ -660,25 +647,30 @@ def main(_):
   )
 
   # preprocessing (i.e. biom table, metadata, ...)
-  (biom_train, biom_test,
-   train_metadata, test_metadata) = model.preprocess(
+  (train_table, test_biom,
+   train_metadata, test_metadata) = preprocess(
      options.formula,
      options.train_table, options.train_metadata,
      options.test_table, options.test_metadata,
      options.min_sample_count, options.min_feature_count
    )
-  samp_ids = biom_train.ids(axis='sample')
-  obs_ids = biom_train.ids(axis='observation')
+  samp_ids = train_table.ids(axis='sample')
+
+  obs_ids = train_table.ids(axis='observation')
   md_ids = np.array(train_metadata.columns)
+  biom_train = train_table.matrix_data.tocoo().T
+  biom_test = test_biom.matrix_data.tocoo().T
 
   # Model code
   with tf.Graph().as_default(), tf.Session() as session:
     model = PoissonRegression(options, session)
-
+    model.initialize()
+    gen = model.retrieve(train_table, train_metadata)
+    y_feed, G_feed = next(gen)
     y_data = tf.sparse_placeholder(
-      dtype=tf.int32, shape=(M, D))
+      dtype=tf.int32, shape=(model.M, model.D), name='y_data_ph')
     G_data = tf.placeholder(
-      tf.float32, shape=(M, p))
+      tf.float32, shape=(model.M, model.p), name='G_data_ph')
 
     # setup cross validation data
     G_test = tf.constant(test_metadata.values, dtype=tf.float32)
@@ -687,8 +679,8 @@ def main(_):
       values=biom_test.data,
       dense_shape=biom_test.shape)
 
-    batch = model.sample(y_data)
-    log_loss = model.loss(G_data, y_data, batch)
+    positive_batch, random_batch = model.sample(y_data)
+    log_loss = model.loss(G_data, y_data, positive_batch, random_batch)
     train_step, grads, variables = model.optimize(log_loss)
     mean_err = model.evaluate(G_test, y_test)
     tf.global_variables_initializer().run()
@@ -696,7 +688,6 @@ def main(_):
     # summary information
     tf.summary.histogram('qbeta', model.qbeta)
     tf.summary.histogram('qgamma', model.qgamma)
-    tf.summary.histogram('theta', model.theta)
     tf.summary.scalar('mean_absolute_error', mean_err)
     for i, g in enumerate(grads):
       tf.summary.histogram('gradient/%s' % variables[i], g)
@@ -706,10 +697,9 @@ def main(_):
     last_statistics_time = 0
 
     # initialize with small minibatch
-    y_feed, G_feed = model.retrieve(0, biom_train, train_metadata)
-    train_, loss, err, beta, gamma, theta = session.run(
+    train_, loss, err, beta, gamma = session.run(
       [train_step, log_loss, mean_err,
-        model.qbeta, model.qgamma, model.theta],
+       model.qbeta, model.qgamma],
       feed_dict={y_data: y_feed, G_data: G_feed}
     )
 
@@ -722,26 +712,26 @@ def main(_):
     start_time = time.time()
     k = 0
     for i in tqdm(range(1, num_iter)):
-
+      now = time.time()
       # grab the next block
       if i % options.block_size == 0:
-        y_feed, G_feed = model.retrieve(biom_train, train_metadata)
-        train_, loss, err, beta, gamma, theta = session.run(
+        y_feed, G_feed = next(gen)
+        train_, loss, err, beta, gamma = session.run(
           [train_step, log_loss, mean_err,
-            model.qbeta, model.qgamma, model.theta],
+            model.qbeta, model.qgamma],
           feed_dict={y_data: y_feed, G_data: G_feed}
         )
         k = k % options.block_size
-
       # check for summary
-      now = time.time()
-      if now - last_summary_time > options.summary_interval:
+      elif now - last_summary_time > options.summary_interval:
         run_metadata = tf.RunMetadata()
         run_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
         _, summary  = session.run(
           [train_step, merged],
           options=run_options,
-          run_metadata=run_metadata)
+          run_metadata=run_metadata,
+          feed_dict={y_data: y_feed, G_data: G_feed}
+        )
         writer.add_summary(summary, i)
         writer.add_run_metadata(run_metadata, 'step%d' % i)
         last_summary_time = now
@@ -751,9 +741,10 @@ def main(_):
           global_step=i)
         last_checkpoint_time = now
       else:
-        train_, loss, beta, gamma, theta = session.run(
+        train_, loss, beta, gamma = session.run(
           [train_step, log_loss,
-           model.qbeta, model.qgamma, model.theta]
+           model.qbeta, model.qgamma],
+          feed_dict={y_data: y_feed, G_data: G_feed}
         )
 
     elapsed_time = time.time() - start_time
@@ -762,7 +753,7 @@ def main(_):
     # save all parameters to the save path
     train_, loss, beta, gamma, theta = session.run(
       [train_step, log_loss,
-       model.qbeta, model.qgamma, model.theta]
+       model.qbeta, model.qgamma]
     )
     pd.DataFrame(
       beta, index=md_ids, columns=obs_ids,
