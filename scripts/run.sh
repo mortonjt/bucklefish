@@ -43,16 +43,17 @@ python poisson_sparse_full.py \
   --learning_rate 1e-1 \
   --num_neg_samples 1024 \
   --batch_size 1024 \
+  --block_size 50 \
   --beta_scale 3 \
   --gamma_scale 3 \
-  --clipping_size 100 \
+  --clipping_size 10 \
   --min_sample_count 100 \
   --min_feature_count 10 \
   --save_path ../logs/poisson_sparse_full_log \
   --statistics_interval 1 \
   --summary_interval 1 \
   --checkpoint_interval 2 \
-  --epochs_to_train 100
+  --epochs_to_train 500
 
 # echo 'poisson ilr'
 # python poisson_sparse_ilr.py \

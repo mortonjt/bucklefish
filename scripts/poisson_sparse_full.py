@@ -1,12 +1,3 @@
-"""
-Here, there is no negative sampling performed.
-Instead, the full likelihood is evaluated.
-
-1. First sample positive entries (i, j) for sample i and feature j
-   (make sure to int64 uniform sampling)
-2. Then compute gradients for all coefficients in sample i
-3. Perform SGD update.
-"""
 import tensorflow as tf
 import os
 import numpy as np
@@ -148,7 +139,8 @@ def preprocess(formula,
   test_table, test_metadata = match(test_table, test_metadata)
 
   # pad extra columns with zeros, so that we can still make predictions
-  extra_columns = list(set(train_metadata.columns) - set(test_metadata.columns))
+  extra_columns = list(
+    set(train_metadata.columns) - set(test_metadata.columns))
   df = pd.DataFrame({C: np.zeros(test_metadata.shape[0])
                      for C in extra_columns}, index=test_metadata.index)
   test_metadata = pd.concat((test_metadata, df), axis=1)
@@ -257,6 +249,44 @@ class PoissonRegression(object):
       print(err)
 
 
+  def retrieve(self, train_table, train_metadata):
+    """ Subsample blocks for training.
+
+    This is not exactly like mini-batching, but it will retreive a block
+    in the event that the block cannot fit in memory.
+
+    Parameters
+    ----------
+    train_table : biom.Table
+       Biom table containing the feature counts within the training dataset.
+    train_metadata : pd.DataFrame
+       Sample metadata table containing all of the measured covariates in
+       the training dataset.
+
+    Yields
+    ------
+    y_feed : tf.SparseTensorValue
+       Sparse Tensor representing small minibatch
+    G_feed : tf.placeholder
+    """
+    # partition the biom table into multiple chunks and yield
+    # the next chunk at retreival
+    while True:
+      table = train_table.subsample(self.block_size, by_id=True)
+      md = train_metadata.loc[table.ids(axis='sample')]
+
+      ids = table.ids(axis='sample')
+      table = table.matrix_data.tocoo().T
+
+      y_feed = tf.SparseTensorValue(
+        indices=np.array([table.row,  table.col]).T.astype(np.int64),
+        values=table.data.astype(np.int32),
+        dense_shape=table.shape)
+      G_feed = md.values.astype(np.float32)
+      # print(md.index)
+      yield y_feed, G_feed
+
+
   def sample(self, y_data):
     """ Creates a minibatch.
 
@@ -278,7 +308,7 @@ class PoissonRegression(object):
     corresponding to the row and column indices.
     """
     with tf.name_scope('sample'):
-      N, D, M = self.N, self.D, self.batch_size
+      N, D, M = self.block_size, self.D, self.batch_size
 
       nnz = tf.size(y_data.values, out_type=tf.int64)
 
@@ -331,8 +361,9 @@ class PoissonRegression(object):
     with tf.name_scope('loss'):
       gamma_mean, gamma_scale = self.gamma_mean, self.gamma_scale
       beta_mean, beta_scale = self.beta_mean, self.beta_scale
-      N, D, p = self.N, self.D, self.p
-      num_nonzero = tf.size(y_data.values, out_type=tf.float32)
+      N, D, p = self.block_size, self.D, self.p
+      num_nonzero = tf.cast(tf.size(y_data.values, out_type=tf.int32),
+                            dtype=tf.float32)
 
       # unpack sparse tensors
       pos_data = tf.cast(positive_batch.values, dtype=tf.float32)
@@ -523,16 +554,17 @@ def main(_):
       summary_interval=FLAGS.summary_interval,
       checkpoint_interval=FLAGS.checkpoint_interval
     )
-    table = train_table.matrix_data.tocoo().T
-    biom_test = test_biom.matrix_data.tocoo().T
-    y_data = tf.SparseTensorValue(
-        indices=np.array([table.row,  table.col]).T,
-        values=table.data,
-        dense_shape=table.shape
-    )
-    G_data = tf.constant(train_metadata.values, dtype=tf.float32)
+    y_data = tf.sparse_placeholder(
+      dtype=tf.int32, shape=(model.block_size, model.D), name='y_data_ph')
+    G_data = tf.placeholder(
+      tf.float32, shape=(model.block_size, model.p), name='G_data_ph')
+
+    gen = model.retrieve(train_table, train_metadata)
+    # need to make this a placeholder
+    y_feed, G_feed = next(gen)
 
     # setup cross validation data
+    biom_test = test_biom.matrix_data.tocoo().T
     G_test = tf.constant(test_metadata.values, dtype=tf.float32)
     y_test = tf.SparseTensorValue(
       indices=np.array([biom_test.row,  biom_test.col]).T,
@@ -559,7 +591,8 @@ def main(_):
     # initialize with small minibatch
     train_, loss, err, beta, gamma = session.run(
       [train_step, log_loss, mean_err,
-       model.qbeta, model.qgamma]
+       model.qbeta, model.qgamma],
+      feed_dict={y_data: y_feed, G_data: G_feed}
     )
 
     epoch = model.num_nonzero // model.batch_size
@@ -574,9 +607,11 @@ def main(_):
       now = time.time()
       # grab the next block
       if i % model.block_size == 0:
+        y_feed, G_feed = next(gen)
         train_, loss, err, beta, gamma = session.run(
           [train_step, log_loss, mean_err,
-            model.qbeta, model.qgamma]
+            model.qbeta, model.qgamma],
+          feed_dict={y_data: y_feed, G_data: G_feed}
         )
         k = k % model.block_size
       # check for summary
@@ -586,7 +621,8 @@ def main(_):
         _, summary  = session.run(
           [train_step, merged],
           options=run_options,
-          run_metadata=run_metadata
+          run_metadata=run_metadata,
+          feed_dict={y_data: y_feed, G_data: G_feed}
         )
         writer.add_summary(summary, i)
         writer.add_run_metadata(run_metadata, 'step%d' % i)
@@ -599,7 +635,8 @@ def main(_):
       else:
         train_, loss, beta, gamma = session.run(
           [train_step, log_loss,
-           model.qbeta, model.qgamma]
+           model.qbeta, model.qgamma],
+          feed_dict={y_data: y_feed, G_data: G_feed}
         )
 
     elapsed_time = time.time() - start_time
@@ -608,7 +645,8 @@ def main(_):
     # save all parameters to the save path
     train_, loss, beta, gamma = session.run(
       [train_step, log_loss,
-       model.qbeta, model.qgamma]
+       model.qbeta, model.qgamma],
+      feed_dict={y_data: y_feed, G_data: G_feed}
     )
     pd.DataFrame(
       beta, index=md_ids, columns=obs_ids,
@@ -627,6 +665,7 @@ def main(_):
 
     mse, mrc = cross_validation(
       G_test, pred_beta, pred_gamma, y_test)
+    print("Loss: %f" % loss)
     print("MSE: %f, MRC: %f" % (mse, mrc))
 
 
