@@ -126,6 +126,8 @@ def preprocess(formula,
   train_table = train_table.filter(sample_filter, axis='sample')
   train_table = train_table.filter(read_filter, axis='observation')
   train_metadata = dmatrix(formula, train_metadata, return_type='dataframe')
+  # filter out useless metadata categories
+  train_metadata = train_metadata.loc[:, (train_metadata**2).sum(axis=0) > 0]  
   train_table, train_metadata = match(train_table, train_metadata)
 
   # hold out data preprocessing
@@ -144,6 +146,7 @@ def preprocess(formula,
   df = pd.DataFrame({C: np.zeros(test_metadata.shape[0])
                      for C in extra_columns}, index=test_metadata.index)
   test_metadata = pd.concat((test_metadata, df), axis=1)
+  test_metadata = test_metadata[train_metadata.columns]
 
   return train_table, test_table, train_metadata, test_metadata
 
@@ -229,6 +232,7 @@ class PoissonRegression(object):
       # num_nonzero = number of nonzero entries in the table.
       self.D, self.N = self.train_table.shape
       self.N, self.p = self.train_metadata.shape
+
       self.num_nonzero = self.train_table.nnz
 
       if isinstance(self.test_biom, str):
@@ -283,7 +287,7 @@ class PoissonRegression(object):
         values=table.data.astype(np.int32),
         dense_shape=table.shape)
       G_feed = md.values.astype(np.float32)
-      # print(md.index)
+
       yield y_feed, G_feed
 
 
@@ -413,8 +417,6 @@ class PoissonRegression(object):
         )
         coef_scale = N * D / self.num_neg_samples
 
-      #pos_prob = tf.Print(pos_prob, [pos_prob])
-      #coef_prob = tf.Print(coef_prob, [coef_prob])
       total_poisson = pos_prob * sparse_scale - coef_prob * coef_scale
 
       with tf.name_scope('priors'):
@@ -523,9 +525,9 @@ def main(_):
      train_biom, train_metadata,
      test_biom, test_metadata,
      FLAGS.min_sample_count, FLAGS.min_feature_count
-   )
-  samp_ids = train_table.ids(axis='sample')
+     )
 
+  samp_ids = train_table.ids(axis='sample')
   obs_ids = train_table.ids(axis='observation')
   md_ids = np.array(train_metadata.columns)
 
@@ -603,7 +605,7 @@ def main(_):
 
     start_time = time.time()
     k = 0
-    for i in tqdm(range(1, num_iter)):
+    for i in range(1, num_iter):
       now = time.time()
       # grab the next block
       if i % model.block_size == 0:
