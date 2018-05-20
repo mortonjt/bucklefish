@@ -583,6 +583,7 @@ def main(_):
     tf.summary.histogram('qbeta', model.qbeta)
     tf.summary.histogram('qgamma', model.qgamma)
     tf.summary.scalar('mean_absolute_error', mean_err)
+    tf.summary.scalar('log_loss', log_loss)
     for i, g in enumerate(grads):
       tf.summary.histogram('gradient/%s' % variables[i], g)
     merged = tf.summary.merge_all()
