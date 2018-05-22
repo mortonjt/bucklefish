@@ -73,6 +73,27 @@ flags.DEFINE_boolean("verbose", False,
                      "are saved during training. ")
 FLAGS = flags.FLAGS
 
+def _type_cast_to_float(df):
+    """ Attempt to cast all of the values in dataframe to float.
+    This will try to type cast all of the series within the
+    dataframe into floats.  If a column cannot be type casted,
+    it will be kept as is.
+    Parameters
+    ----------
+    df : pd.DataFrame
+    Returns
+    -------
+    pd.DataFrame
+    """
+    # TODO: Will need to improve this, as this is a very hacky solution.
+    for c in df.columns:
+        s = df[c]
+        try:
+            df[c] = s.astype(np.float64)
+        except Exception:
+            continue
+    return df
+
 
 def preprocess(formula,
                train_table, train_metadata,
@@ -119,19 +140,24 @@ def preprocess(formula,
   require some extra consideration when this is no longer the case.
   """
   # preprocessing
+  print('preprocessing')
   train_table, train_metadata = train_table, train_metadata
+  train_metadata = _type_cast_to_float(train_metadata)
   sample_filter = lambda val, id_, md: (
     (id_ in train_metadata.index) and np.sum(val) > min_sample_count)
   read_filter = lambda val, id_, md: np.sum(val) > min_feature_count
   train_table = train_table.filter(sample_filter, axis='sample')
   train_table = train_table.filter(read_filter, axis='observation')
+  print('formula', formula)
   train_metadata = dmatrix(formula, train_metadata, return_type='dataframe')
   # filter out useless metadata categories
   train_metadata = train_metadata.loc[:, (train_metadata**2).sum(axis=0) > 0]  
   train_table, train_metadata = match(train_table, train_metadata)
-
+  print('train_table', train_table.shape, 'train_metadata', train_metadata.shape)
+  print(train_metadata.columns)
   # hold out data preprocessing
   test_table, test_metadata = test_table, test_metadata
+  test_metadata = _type_cast_to_float(test_metadata)
   metadata_filter = lambda val, id_, md: id_ in test_metadata.index
   obs_lookup = set(train_table.ids(axis='observation'))
   feat_filter = lambda val, id_, md: id_ in obs_lookup
@@ -139,6 +165,7 @@ def preprocess(formula,
   test_table = test_table.filter(feat_filter, axis='observation')
   test_metadata = dmatrix(formula, test_metadata, return_type='dataframe')
   test_table, test_metadata = match(test_table, test_metadata)
+  print('test_table', test_table.shape, 'test_metadata', test_metadata.shape)
 
   # pad extra columns with zeros, so that we can still make predictions
   extra_columns = list(
@@ -512,13 +539,14 @@ class PoissonRegression(object):
 
 
 def main(_):
-
+  print('begin')
   # preprocessing (i.e. biom table, metadata, ...)
   train_biom = load_table(FLAGS.train_biom)
   test_biom = load_table(FLAGS.test_biom)
   train_metadata = pd.read_table(FLAGS.train_metadata, index_col=0)
   test_metadata = pd.read_table(FLAGS.test_metadata, index_col=0)
   formula = FLAGS.formula + '+0'
+  print(formula)
   (train_table, test_biom,
    train_metadata, test_metadata) = preprocess(
      formula,
@@ -607,6 +635,7 @@ def main(_):
     start_time = time.time()
     k = 0
     for i in range(1, num_iter):
+      print('Iteration', i)
       now = time.time()
       # grab the next block
       if i % model.block_size == 0:
@@ -673,4 +702,5 @@ def main(_):
 
 
 if __name__ == "__main__":
+  print('run')
   tf.app.run()
